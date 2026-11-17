@@ -8,6 +8,19 @@ export interface ProjectRepository {
   defaultBranch: string;
 }
 
+export interface StoredCollaborator {
+  id: string;
+  userId: string;
+  role: "OWNER" | "EDITOR" | "VIEWER";
+  status: "ACTIVE" | "PENDING";
+  acceptedAt?: string;
+  user?: {
+    username: string;
+    email?: string;
+    avatarUrl?: string;
+  };
+}
+
 export interface StoredProject {
   id: string;
   name: string;
@@ -15,7 +28,7 @@ export interface StoredProject {
   createdAt: string;
   isDefault?: boolean;
   createdBy?: string;
-  collaborators: any[];
+  collaborators: StoredCollaborator[];
   sandboxIds: string[];
   repositories?: ProjectRepository[];
 }

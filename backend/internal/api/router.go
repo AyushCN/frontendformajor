@@ -297,6 +297,7 @@ func (s *Server) Router() http.Handler {
 			pr.Get("/{id}/files", s.handleFileTree)
 			pr.Get("/{id}/file", s.handleFileContent)
 			pr.Put("/{id}/file", s.handleSaveFile)
+			pr.Post("/{id}/file", s.handleSaveFile)
 			pr.Post("/{id}/commit", s.handleCommitPush)
 		})
 

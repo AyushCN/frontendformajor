@@ -126,3 +126,66 @@ graph TD
 2. **Database Migrations:** All schema additions (e.g., partial unique index for default projects, copy-on-write lineage metadata) must be purely additive migrations with verified `.up.sql` and `.down.sql` parity.
 3. **Runtime Preservation:** Working Docker runtime and builder detection routines (Railpack, Nixpacks, Dockerfile) must be strictly preserved without breaking changes.
 
+
+---
+
+## 6. Completed Stages — Implementation Record
+
+### Stage 1 ✅ Repository-Wide Audit (Commit: Initial)
+- Identified D-01 through D-07 defects covering auth bypasses, frontend JSON store, CoW absence, lifecycle race conditions, and missing CI gates.
+- Produced this document and `docs/SINGLE_TENANT_AUDIT.md`.
+
+### Stage 2 ✅ Authentication & Identity Hardening (Commit: `2a0d5d0`)
+**Files:** `backend/internal/config/config.go`, `backend/internal/cache/redis.go`, `backend/internal/api/auth.go`, `backend/internal/proxy/wake_middleware.go`, `backend/internal/api/auth_test.go`
+
+- Production OAuth enforcement: missing `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`GITHUB_OAUTH_CALLBACK_URL` fails startup.
+- Session cookie upgraded to `<githubID>:<issuedAt>:<nonce>` — 30-day max TTL enforced.
+- `RevokeSession` / `IsSessionRevoked` added to Redis cache layer.
+- `handleLogout` extracts nonce and revokes it in Redis before clearing the cookie.
+- `handleDevLogin` returns HTTP 403 in production.
+- 5 unit tests: all pass (100%).
+
+### Stage 3 ✅ Projects, RBAC & Editor Copy-on-Write (Commit: `42e9463`)
+**Files:** `backend/migrations/0007_*.sql`, `backend/internal/db/queries.go`, `backend/internal/api/sandboxes.go`, `backend/internal/api/files.go`, `backend/internal/api/commit_push.go`, `backend/internal/api/actions.go`, `backend/internal/api/cow_test.go`
+
+- Partial unique index `idx_projects_user_default` prevents concurrent duplicate default projects.
+- `requireSandboxRoleForMutation`: mutating operations by a non-owner trigger `createCopyOnWriteFork`.
+- Fork deep-copies workspace files and volumes, sets `parent_sandbox_id`, responds with `X-CoW-Forked-Sandbox-ID` / `X-CoW-Forked-Subdomain` headers.
+- Original shared sandbox is never modified.
+- 2 unit tests: all pass (100%).
+
+### Stage 4 ✅ Lifecycle Fencing & Runtime Cleanup (Commit: `ab3e3df`)
+**Files:** `backend/internal/reaper/expiry_reaper.go`, `backend/internal/orchestrator/teardown.go`, `backend/cmd/server/main.go`, `backend/internal/reaper/expiry_reaper_test.go`
+
+- **Teardown-before-tombstone**: `ExpiryReaper` runs `TeardownSandbox` first; on failure, retries on the next tick without marking the DB row expired (Requirement 8).
+- **Orphan container reconciliation**: `ReconcileOrphanContainers` runs at server startup, removes all Docker containers whose sandbox DB row is missing, deleted, or expired.
+- `ExpiryStore` and `ExpiryOrchestrator` interfaces extracted for testability.
+- 3 unit tests: all pass (100%).
+
+### Stage 5 (In Progress) — Runtime & Build Security
+- Container isolation policy already enforced: `CapDrop: ALL`, `CapAdd: NET_BIND_SERVICE`, `no-new-privileges`, per-sandbox bridge networks.
+- Platform services bound to `127.0.0.1` in both compose files (loopback protection).
+- gVisor (`runsc`) supported via `SANDBOX_RUNTIME` configuration.
+- Remaining: resource limit tuning documentation.
+
+### Stage 6 (In Progress) — Frontend Integration & Typed Client
+**Files:** `frontend/lib/api-client.ts` (new), `frontend/lib/projects-store.ts`, `frontend/app/api/projects/route.ts`, `backend/internal/api/router.go`
+
+- Created `frontend/lib/api-client.ts`: centralized typed `apiClient` with explicit TypeScript DTOs for all entities.
+- `ApiError` class carries HTTP status, message, and raw payload.
+- `collaborators: any[]` eliminated from `StoredProject`; replaced with typed `StoredCollaborator`.
+- Backend router: added `POST /{id}/file` alias alongside `PUT` for broader client compatibility.
+- Frontend build: `tsc --noEmit` ✅, `next build` ✅.
+
+### Stage 7 (Planned) — Centralized Config & Operational Telemetry
+- Health/readiness probes at `/healthz` and `/readyz`.
+- Structured JSON logging with request tracing.
+- Metrics endpoint.
+
+### Stage 8 (Partial) — Testing, CI Gates & Release
+**Files:** `.github/workflows/ci.yml`
+
+- Added `frontend` to CI trigger branches (push & pull_request).
+- Added `frontend-build` job: `npm ci` → `tsc --noEmit` → `next build`.
+- Removed `frontend/AGENTS.md` and `frontend/CLAUDE.md` (AI agent instruction files not for version control).
+- Updated root `README.md`: CI badge, correct repo URL, security table, CI pipeline table, quick start with OAuth requirement.

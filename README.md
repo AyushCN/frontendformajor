@@ -1,5 +1,6 @@
 # API Sandbox Links
 
+[![CI](https://github.com/AyushCN/frontendformajor/actions/workflows/ci.yml/badge.svg?branch=frontend)](https://github.com/AyushCN/frontendformajor/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?style=flat&logo=go)](https://golang.org)
 [![Next.js](https://img.shields.io/badge/Next.js-16.2-black?style=flat&logo=next.js)](https://nextjs.org)
 [![Docker](https://img.shields.io/badge/Docker-28%2B-2496ED?style=flat&logo=docker)](https://www.docker.com)
@@ -8,16 +9,18 @@
 
 > The operating system for modern ephemeral cloud environments. Turn any GitHub repository into an isolated, time-limited, live-previewable developer sandbox in seconds.
 
+> **Active development branch:** [`frontend`](https://github.com/AyushCN/frontendformajor/tree/frontend)
+
 ---
 
 ## Highlights
 
-* 🚀 **Deterministic Builder Engine**: Prioritizes native `Dockerfile` configurations, intelligent **Railpack** buildpack plans with **BuildKit** layer caching over TCP (`:1234`), and supported Nixpacks fallback.
-* 📦 **Zero-Leak Sidecar Databases**: Automatic dependency scanning detects database drivers (`pg`, `mysql2`, `psycopg2`, Prisma, GORM) and provisions isolated, pre-seeded PostgreSQL or MySQL containers on a shared bridge network.
+* 🚀 **Deterministic Builder Engine**: Prioritizes native `Dockerfile` configurations, intelligent **Railpack** buildpack plans with **BuildKit** layer caching over TCP (`:1234`), and Nixpacks fallback.
+* 📦 **Zero-Leak Sidecar Databases**: Automatic dependency scanning detects database drivers (`pg`, `mysql2`, `psycopg2`, Prisma, GORM) and provisions isolated PostgreSQL or MySQL containers on per-sandbox bridge networks.
 * ⚡ **Single-Flight Wake-on-Request**: Idle containers automatically hibernate after inactivity. Inbound HTTP gateway requests (`:8090`) trigger instantaneous single-flight container wakeups with live boot log streaming.
-* 👥 **Workspace Projects & Multi-Tenancy**: Organize sandboxes into microservice project groups. Manage collaborator roles (`OWNER`, `EDITOR`, `VIEWER`), assign repositories, and isolate environments without cross-project leakage.
+* 👥 **Project Collaboration & RBAC**: Organize sandboxes into projects. Manage collaborator roles (`OWNER`, `EDITOR`, `VIEWER`) with backend-enforced authorization and **Copy-on-Write** isolation — an Editor never modifies the original shared sandbox.
 * 💻 **In-Browser IDE & Live Telemetry**: Live stdout/stderr logs over WebSockets, xterm terminal console, Monaco code editor with save-redeploy loops, and one-click Git commits pushed to remote branches.
-* 🛡️ **Container Hardening & gVisor Isolation**: Capability dropping (`CapDrop: ALL`), `no-new-privileges`, rootless BuildKit builds, and optional Google **gVisor** (`runsc`) user-space kernel virtualization.
+* 🛡️ **Production-Grade Security**: Capability dropping (`CapDrop: ALL`), `no-new-privileges`, rootless BuildKit builds, AES-256-GCM secret encryption, cryptographic session nonces with instant Redis revocation, and optional Google **gVisor** (`runsc`) user-space kernel virtualization.
 * 🎨 **Refined Ash & Coral Design System**: Clean, modern UI with theme-synchronized light/dark modes, custom ash grey terminals, and subtle contrast controls.
 
 ---
@@ -67,6 +70,7 @@
 - **Docker Engine** & **Docker Compose v2** installed and running.
 - **Go 1.25+** (tested against Go 1.25 / 1.26).
 - **Node.js 20+** (LTS or Node 24).
+- **GitHub OAuth App** with callback URL `http://localhost:8080/api/auth/callback/github`.
 - **Railpack CLI** (optional for host builds; runs via BuildKit):
   ```bash
   curl -sSL https://railpack.com/install.sh | sh
@@ -75,27 +79,34 @@
 ### 2. Infrastructure Setup
 ```bash
 # Clone the repository
-git clone https://github.com/AyushCN/api-sandbox-links.git
-cd api-sandbox-links
+git clone https://github.com/AyushCN/frontendformajor.git
+cd frontendformajor
+git checkout frontend
 
 # Configure environment variables
 cp .env.example .env
+# Edit .env — set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, ENCRYPTION_KEY, etc.
 
 # Spin up Postgres (5434), Redis (6380), Traefik (80/8081), and BuildKit (1234)
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-### 3. Backend Service
+### 3. Run Database Migrations
 ```bash
-# Build binary from backend/ (where go.mod resides)
-cd backend && go build -o server ./cmd/server && cd ..
-
-# Launch backend from the repository root (reads root .env)
-./backend/server
+cd backend
+go run ./cmd/migrate up
 ```
-*Note: In dev mode (`GITHUB_CLIENT_ID` empty in `.env`), the backend auto-authenticates requests as a local developer user.*
 
-### 4. Frontend Application
+### 4. Backend Service
+```bash
+cd backend
+go run ./cmd/server
+```
+
+> **Development** (`APP_ENVIRONMENT=development`): OAuth configuration is optional; DevAuth is permitted.  
+> **Production** (`APP_ENVIRONMENT=production`): `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `GITHUB_OAUTH_CALLBACK_URL` are **required** at startup. `DEV_AUTH` is forcibly disabled.
+
+### 5. Frontend Application
 ```bash
 cd frontend
 npm install
@@ -109,44 +120,71 @@ Open **[http://localhost:3000](http://localhost:3000)** in your browser to acces
 
 ```
 api-sandbox-links/
-├── backend/                  # Go service (Chi, GORM, Docker Engine SDK, BuildKit)
-│   ├── cmd/server/           # Application entrypoint
-│   ├── internal/api/         # REST routes, WebSockets, auth, and gateway proxy
-│   ├── internal/orchestrator/# Container lifecycle, Railpack/Dockerfile builders, sidecars
-│   ├── internal/db/          # Database queries and GORM schemas
-│   └── migrations/           # Versioned SQL migrations
+├── backend/                  # Go service (Chi, pgx, Docker Engine SDK, BuildKit)
+│   ├── cmd/server/           # Application entrypoint with startup validation
+│   ├── cmd/migrate/          # Database migration runner
+│   ├── internal/api/         # REST routes, WebSockets, auth, CoW sandboxing
+│   ├── internal/orchestrator/# Container lifecycle, builders, orphan reconciliation
+│   ├── internal/reaper/      # Idle & expiry background workers with retry-on-failure
+│   ├── internal/db/          # Typed database queries
+│   └── migrations/           # Versioned SQL migrations (0001–0007)
 ├── frontend/                 # Next.js 16 (React 19, Tailwind CSS v4, Monaco Editor)
 │   ├── app/                  # App Router pages (Landing, Dashboard, Projects, IDE)
 │   ├── components/           # UI components, terminal consoles, theme toggle
-│   └── lib/                  # Auth state, theme provider, persistent projects store
+│   └── lib/                  # Typed API client, auth state, theme provider
 ├── docs/                     # Detailed architectural specifications & guides
-│   ├── ARCHITECTURE.md       # Deep dive into routing, wake-on-request & builders
-│   ├── SETUP.md              # Complete dev environment runbook & troubleshooting
-│   ├── API.md                # Comprehensive REST & WebSocket endpoint catalog
+│   ├── ARCHITECTURE.md       # Routing, wake-on-request & builder pipeline
+│   ├── SETUP.md              # Development environment runbook & troubleshooting
+│   ├── API.md                # REST & WebSocket endpoint catalog
 │   ├── DATABASE.md           # Schema definitions and data lifecycle models
-│   ├── SECURITY.md           # Threat models, gVisor containment & auth tokens
-│   └── RUNBOOK.md            # Production deployment and operations guide
+│   ├── SECURITY.md           # Threat models, gVisor containment & session security
+│   ├── RUNBOOK.md            # Production deployment and operations guide
+│   └── SINGLE_TENANT_AUDIT.md # Engineering audit & remediation log
 ├── traefik/                  # Traefik dynamic file configuration
-└── docker-compose.dev.yml    # Development infrastructure stack
+├── docker-compose.dev.yml    # Development infrastructure stack
+└── docker-compose.prod.yml   # Production infrastructure blueprint
 ```
+
+---
+
+## Security Design
+
+| Property | Implementation |
+|---|---|
+| **Authentication** | GitHub OAuth 2.0 with CSRF state validation |
+| **Sessions** | `<githubID>:<issuedAt>:<nonce>` cookie — 30-day max TTL, instant Redis revocation on logout |
+| **Secrets** | AES-256-GCM encryption of all stored tokens via `secret.Box` |
+| **Container isolation** | `CapDrop: ALL`, `CapAdd: NET_BIND_SERVICE`, `no-new-privileges`, per-sandbox bridge networks |
+| **Editor CoW** | An `EDITOR` modifying a shared sandbox gets an independent fork — the original is never touched |
+| **Orphan recovery** | On startup, containers whose DB rows are expired/deleted are stopped and removed |
+| **Teardown integrity** | A sandbox is never marked expired in the database until Docker teardown succeeds |
+| **Production enforcement** | Missing OAuth config fails startup; DevAuth hardcoded `false` in production |
+
+---
+
+## CI Pipeline
+
+The [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on `main`, `master`, `production`, and **`frontend`** branches:
+
+| Job | What it checks |
+|---|---|
+| **Backend Unit Tests & Vetting** | `go vet`, `go test -v -count=1 ./...`, binary build |
+| **End-to-End Smoke Test** | Nixpacks + Railpack real Docker deploy of `node-js-sample` |
+| **Frontend TypeScript & Build** | `tsc --noEmit`, `next build` |
 
 ---
 
 ## Documentation Index
 
-Explore our comprehensive technical documentation:
-
-- 📖 **[docs/README.md](docs/README.md)** — Master documentation index and reading order.
-- ⚙️ **[backend/README.md](backend/README.md)** — Go backend architecture, two listeners (`:8080` & `:8090`), builders, and tests.
-- 🎨 **[frontend/README.md](frontend/README.md)** — Next.js 16 Web IDE, ash grey terminals, workspace projects, and theme tokens.
-- 🛠️ **[docs/SETUP.md](docs/SETUP.md)** — Step-by-step development setup, port mapping (`:5434`, `:6380`, `:1234`), and debugging guide.
+- 🛠️ **[docs/SETUP.md](docs/SETUP.md)** — Step-by-step development setup, port mapping, and debugging guide.
 - 🏛️ **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System architecture, gateway proxy, wake-on-request, and container lifecycles.
-- ⚡ **[docs/LIFECYCLE.md](docs/LIFECYCLE.md)** — Advanced lifecycle state machine, multi-user activity, grace periods, and data retention.
-- 👥 **[docs/COLLABORATION.md](docs/COLLABORATION.md)** — Project collaboration, RBAC matrix, and Default Personal Space vs Shareable Projects.
-- 📡 **[docs/API.md](docs/API.md)** — Complete API specifications for Sandboxes, Workspace Projects, and WebSockets.
-- 🗄️ **[docs/DATABASE.md](docs/DATABASE.md)** — PostgreSQL schema models, GORM definitions, and retention rules.
-- 🔒 **[docs/SECURITY.md](docs/SECURITY.md)** — Threat model, capability dropping, AES-256 token encryption, and gVisor sandboxing.
-- 🚀 **[docs/RUNBOOK.md](docs/RUNBOOK.md)** — Production operations, systemd unit definitions, automated recovery, and TLS.
+- ⚡ **[docs/LIFECYCLE.md](docs/LIFECYCLE.md)** — Lifecycle state machine, wake/expiry race fixes, grace periods, and data retention.
+- 👥 **[docs/COLLABORATION.md](docs/COLLABORATION.md)** — Project collaboration, RBAC matrix, and Copy-on-Write isolation.
+- 📡 **[docs/API.md](docs/API.md)** — Complete REST & WebSocket endpoint specifications.
+- 🗄️ **[docs/DATABASE.md](docs/DATABASE.md)** — PostgreSQL schema, migrations, and data lifecycle.
+- 🔒 **[docs/SECURITY.md](docs/SECURITY.md)** — Threat model, capability dropping, session revocation, and gVisor sandboxing.
+- 🚀 **[docs/RUNBOOK.md](docs/RUNBOOK.md)** — Production operations, systemd units, automated recovery, and TLS.
+- 🔍 **[docs/SINGLE_TENANT_AUDIT.md](docs/SINGLE_TENANT_AUDIT.md)** — Engineering audit findings and production readiness remediation log.
 
 ---
 

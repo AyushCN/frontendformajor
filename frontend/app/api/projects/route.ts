@@ -14,10 +14,13 @@ export async function GET(req: NextRequest) {
       headers,
       cache: "no-store",
     });
-    const data = await res.json().catch(() => ([]));
+    const data = await res.json().catch(() => ({}));
     return NextResponse.json(data, { status: res.status });
-  } catch {
-    return NextResponse.json([], { status: 503 });
+  } catch (err: unknown) {
+    return NextResponse.json(
+      { error: (err as Error).message || "Backend service unavailable" },
+      { status: 503 }
+    );
   }
 }
 
