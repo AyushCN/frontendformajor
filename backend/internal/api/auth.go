@@ -5,9 +5,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,16 +24,6 @@ import (
 // GitHub numeric ID; decryption doubles as authenticity (attacker-crafted
 // cookies fail authentication). See secret.Box.
 const oauthStateCookie = "asl_session"
-
-// devUser is used only when OAuth is not configured (DevAuth mode) so the
-// deploy loop is testable end-to-end without a GitHub App.
-var devUser = db.User{
-	ID:          "00000000-0000-0000-0000-000000000001",
-	GithubID:    1,
-	Username:    "admin",
-	Email:       "admin@api-sandbox.local",
-	GithubToken: []byte("admin"), // non-empty so the NOT NULL column is satisfied
-}
 
 type ctxKey int
 
@@ -172,29 +164,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // requireUser is middleware ensuring a session exists; it resolves the user
-// from the signed session cookie and stashes the *db.User in context. In
-// DevAuth mode it fabricates the dev user instead of failing.
+// from the signed session cookie and stashes the *db.User in context.
 func (s *Server) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := s.sessionUser(r)
-		if err != nil && !s.cfg.DevAuth {
-			host := r.Host
-			if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
-				if err := s.store.UpsertUser(&devUser); err != nil {
-					s.logger.Warn("dev auth: could not seed dev user", slog.String("err", err.Error()))
-				}
-				user = &devUser
-			} else {
-				http.Error(w, "not signed in", http.StatusUnauthorized)
-				return
-			}
-		} else if err != nil {
-			// DevAuth: fabricate the dev identity. Make sure it exists in the
-			// DB so repositories/sandboxes get a valid user_id foreign key.
-			if err := s.store.UpsertUser(&devUser); err != nil {
-				s.logger.Warn("dev auth: could not seed dev user", slog.String("err", err.Error()))
-			}
-			user = &devUser
+		if err != nil {
+			http.Error(w, "not signed in", http.StatusUnauthorized)
+			return
 		}
 		ctx := context.WithValue(r.Context(), ctxUserKey, user)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -261,10 +237,41 @@ func (s *Server) fetchGithubUser(ctx context.Context, token string) (*githubProf
 }
 
 func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.UpsertUser(&devUser); err != nil {
-		s.logger.Warn("dev auth: could not seed dev user", slog.String("err", err.Error()))
+	if !s.cfg.DevAuth {
+		http.Error(w, "dev auth disabled", http.StatusForbidden)
+		return
 	}
-	session, err := s.box.Encrypt([]byte(strconv.FormatInt(devUser.GithubID, 10)))
+	var req struct {
+		Username string `json:"username"`
+		Email    string `json:"email"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	uname := strings.TrimSpace(req.Username)
+	if uname == "" {
+		uname = os.Getenv("DEV_USER_USERNAME")
+	}
+	if uname == "" {
+		uname = "developer"
+	}
+	email := strings.TrimSpace(req.Email)
+	if email == "" {
+		email = os.Getenv("DEV_USER_EMAIL")
+	}
+	if email == "" {
+		email = fmt.Sprintf("%s@users.api-sandbox.local", strings.ToLower(uname))
+	}
+
+	user := db.User{
+		ID:          "00000000-0000-0000-0000-000000000001",
+		GithubID:    1,
+		Username:    uname,
+		Email:       email,
+		GithubToken: []byte(uname),
+	}
+	if err := s.store.UpsertUser(&user); err != nil {
+		s.logger.Warn("dev auth: could not upsert user", slog.String("err", err.Error()))
+	}
+	session, err := s.box.Encrypt([]byte(strconv.FormatInt(user.GithubID, 10)))
 	if err != nil {
 		http.Error(w, "could not generate session", http.StatusInternalServerError)
 		return
@@ -279,7 +286,7 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   isSecure,
 		MaxAge:   30 * 24 * 3600, // 30 days
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": devUser})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": user})
 }
 
 // handleSearchUsers searches registered users by username or email.

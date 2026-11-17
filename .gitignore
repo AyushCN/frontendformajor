@@ -1,6 +1,7 @@
 # secrets — never commit
 .env
-.env.example
+.env.local
+.env.*.local
 
 # go
 backend/server

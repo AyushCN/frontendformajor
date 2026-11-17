@@ -297,26 +297,9 @@ func (g *Gateway) subdomainFromHost(host string) (string, error) {
 	return sub, nil
 }
 
-var devUser = db.User{
-	ID:       "00000000-0000-0000-0000-000000000001",
-	GithubID: 1,
-	Username: "admin",
-	Email:    "admin@api-sandbox.local",
-}
-
 func (g *Gateway) authenticateRequest(r *http.Request) (*db.User, error) {
-	if g.cfg != nil && g.cfg.DevAuth {
-		return &devUser, nil
-	}
 	cookie, err := r.Cookie("asl_session")
 	if err != nil {
-		authHdr := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHdr, "Bearer ") {
-			token := strings.TrimPrefix(authHdr, "Bearer ")
-			if token == "dev" || token == "admin" {
-				return &devUser, nil
-			}
-		}
 		return nil, fmt.Errorf("no session cookie found")
 	}
 	if g.cfg != nil && len(g.cfg.EncryptionKey) == 32 {
