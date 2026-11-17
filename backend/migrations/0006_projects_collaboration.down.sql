@@ -5,3 +5,4 @@ DROP TABLE IF EXISTS project_invitations;
 DROP TABLE IF EXISTS project_members;
 DROP TABLE IF EXISTS project_repositories;
 DROP TABLE IF EXISTS projects;
+

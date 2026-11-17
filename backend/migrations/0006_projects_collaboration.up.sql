@@ -83,3 +83,4 @@ CREATE TABLE audit_events (
 );
 CREATE INDEX idx_audit_events_project ON audit_events(project_id);
 CREATE INDEX idx_audit_events_created_at ON audit_events(created_at);
+

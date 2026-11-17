@@ -63,3 +63,4 @@ The working Docker container sandbox runtime, builder detection engine, and slid
 6. **Phase 6: Testing & Quality Assurance**
    - Go unit tests, database queries tests, RBAC tests, race detector (`go test -race`).
    - Frontend type checks (`npx tsc --noEmit`) and production builds.
+

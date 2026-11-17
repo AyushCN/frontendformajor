@@ -425,3 +425,4 @@ func TestProjectsAndCollaboration(t *testing.T) {
 		t.Fatalf("expected editor to be authorized for EDITOR actions, got error: %v", err)
 	}
 }
+
