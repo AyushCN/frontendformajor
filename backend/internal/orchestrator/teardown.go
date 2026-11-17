@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/api-sandbox-links/backend/internal/db"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/volume"
@@ -164,6 +165,47 @@ func (o *Orchestrator) RemoveImage(ctx context.Context, ref string) error {
 		return fmt.Errorf("orchestrator: removing image %s: %w", ref, err)
 	}
 	return nil
+}
+
+// ReconcileOrphanContainers inspects all Docker containers carrying the platform label.
+// If a container's sandbox no longer exists in PostgreSQL or is marked destroyed/expired/deleted,
+// it tears down the orphan container and its private network.
+func (o *Orchestrator) ReconcileOrphanContainers(ctx context.Context) (int, error) {
+	if o.docker == nil {
+		return 0, nil
+	}
+	f := filters.NewArgs()
+	f.Add("label", SandboxIDLabel)
+	containers, err := o.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	if err != nil {
+		return 0, fmt.Errorf("listing labeled containers: %w", err)
+	}
+
+	cleaned := 0
+	for _, c := range containers {
+		sbID := c.Labels[SandboxIDLabel]
+		if sbID == "" {
+			continue
+		}
+		sb, err := o.store.GetSandbox(sbID)
+		isOrphan := false
+		if err != nil {
+			isOrphan = true
+		} else if sb.DestroyedAt != nil || sb.Status == db.StatusExpired || sb.Status == db.StatusDeleted {
+			isOrphan = true
+		}
+
+		if isOrphan {
+			o.logger.Info("orchestrator: cleaning orphan container",
+				slog.String("sandbox_id", sbID),
+				slog.String("container_id", c.ID))
+			_ = o.StopContainer(ctx, c.ID)
+			_ = o.RemoveContainer(ctx, c.ID)
+			_ = o.RemoveNetwork(ctx, sbID)
+			cleaned++
+		}
+	}
+	return cleaned, nil
 }
 
 // sandboxImageRef returns the image this platform built for the sandbox. It

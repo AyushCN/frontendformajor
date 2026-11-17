@@ -7,3 +7,4 @@ WHERE is_default = TRUE;
 -- Add index on sandboxes parent_sandbox_id for fast CoW lineage lookups
 CREATE INDEX IF NOT EXISTS idx_sandboxes_parent_sandbox_id
 ON sandboxes (parent_sandbox_id);
+

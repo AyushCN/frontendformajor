@@ -125,3 +125,4 @@ graph TD
 1. **Existing Persistent Workspaces:** Persistent workspace files located in `SANDBOX_WORK_DIR` (`/tmp/api-sandbox-links/work/`) must remain intact throughout all lifecycle operations.
 2. **Database Migrations:** All schema additions (e.g., partial unique index for default projects, copy-on-write lineage metadata) must be purely additive migrations with verified `.up.sql` and `.down.sql` parity.
 3. **Runtime Preservation:** Working Docker runtime and builder detection routines (Railpack, Nixpacks, Dockerfile) must be strictly preserved without breaking changes.
+
