@@ -83,6 +83,9 @@ jobs:
             sudo sysctl -w kernel.unprivileged_userns_clone=1
           fi
 
+          # Allow host and container traffic forwarding across Docker custom bridge networks
+          sudo iptables -P FORWARD ACCEPT || true
+
       - name: Start Infrastructure Containers
         run: |
           dump_diagnostics() {

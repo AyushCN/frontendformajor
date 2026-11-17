@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/config"
@@ -426,7 +428,8 @@ var discoverPortCandidates = []int{8080, 8000, 3000, 5000, 5001, 4000, 9000, 888
 // planned (nixpacks-detected) port is tried first, then a set of well-known
 // app ports, returning the first one that accepts a TCP connection. App
 // startup can be slow (waiting on a database), so probing runs until timeout.
-func (o *Orchestrator) DiscoverPort(ctx context.Context, ip string, planned int, timeout time.Duration) (int, error) {
+// When containerID is provided, it proactively checks if the container exited.
+func (o *Orchestrator) DiscoverPort(ctx context.Context, ip string, planned int, timeout time.Duration, containerID ...string) (int, error) {
 	seen := map[int]bool{}
 	candidates := make([]int, 0, len(discoverPortCandidates)+1)
 	for _, p := range append([]int{planned}, discoverPortCandidates...) {
@@ -440,6 +443,27 @@ func (o *Orchestrator) DiscoverPort(ctx context.Context, ip string, planned int,
 		if ctx.Err() != nil {
 			return 0, fmt.Errorf("orchestrator: discovering app port: %w", ctx.Err())
 		}
+		// Periodically verify the container has not died prematurely
+		if len(containerID) > 0 && containerID[0] != "" && i%4 == 0 {
+			if inspect, err := o.docker.ContainerInspect(ctx, containerID[0]); err == nil {
+				if !inspect.State.Running {
+					logMsg := ""
+					if logsReader, lErr := o.docker.ContainerLogs(ctx, containerID[0], container.LogsOptions{
+						ShowStdout: true,
+						ShowStderr: true,
+						Tail:       "50",
+					}); lErr == nil {
+						if b, rErr := io.ReadAll(logsReader); rErr == nil {
+							logMsg = string(b)
+						}
+						logsReader.Close()
+					}
+					return 0, fmt.Errorf("container exited prematurely (status: %s, exit_code: %d): %s",
+						inspect.State.Status, inspect.State.ExitCode, strings.TrimSpace(logMsg))
+				}
+			}
+		}
+
 		port := candidates[i%len(candidates)]
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, itoa(port)), 2*time.Second)
 		if err == nil {
