@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -101,6 +102,24 @@ func (s *ContextStagingEngine) Stage(
 		} else {
 			result.Warnings = append(result.Warnings,
 				"injected .python-version into staging context (not written to original repo)")
+		}
+	}
+
+	// Inject Railpack start command if no railpack.json exists in original repository.
+	if plan.SelectedBuilder == "railpack" && plan.StartCommand != "" {
+		rpPath := filepath.Join(stagingDir, "railpack.json")
+		if _, statErr := os.Stat(rpPath); os.IsNotExist(statErr) {
+			payload := map[string]any{
+				"deploy": map[string]string{
+					"startCommand": plan.StartCommand,
+				},
+			}
+			if data, err := json.MarshalIndent(payload, "", "  "); err == nil {
+				if writeErr := os.WriteFile(rpPath, data, 0644); writeErr == nil {
+					result.Warnings = append(result.Warnings,
+						fmt.Sprintf("injected railpack.json with startCommand: %s into staging context (not written to original repo)", plan.StartCommand))
+				}
+			}
 		}
 	}
 

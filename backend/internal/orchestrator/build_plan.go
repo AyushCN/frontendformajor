@@ -45,6 +45,8 @@ type ResolvedBuildPlan struct {
 	BuildCommand            string                   `json:"build_command,omitempty"`
 	InstallCommand          string                   `json:"install_command,omitempty"`
 	PreserveImageEntrypoint bool                     `json:"preserve_image_entrypoint"`
+	ExecutionMode           ExecutionMode            `json:"execution_mode"`
+	EntryPoint              *EntryPointResolution    `json:"entry_point,omitempty"`
 	EnvironmentVariables    map[string]string        `json:"environment_variables,omitempty"`
 	CreatedAt               time.Time                `json:"created_at"`
 }
@@ -78,6 +80,24 @@ func (p *ResolvedBuildPlan) Clone() *ResolvedBuildPlan {
 	if p.Recommendation.TriggerPackages != nil {
 		cp.Recommendation.TriggerPackages = make([]string, len(p.Recommendation.TriggerPackages))
 		copy(cp.Recommendation.TriggerPackages, p.Recommendation.TriggerPackages)
+	}
+
+	// Deep copy EntryPoint
+	if p.EntryPoint != nil {
+		epCopy := *p.EntryPoint
+		if p.EntryPoint.PrimaryCandidate != nil {
+			pcCopy := *p.EntryPoint.PrimaryCandidate
+			epCopy.PrimaryCandidate = &pcCopy
+		}
+		if p.EntryPoint.Candidates != nil {
+			epCopy.Candidates = make([]EntryPointCandidate, len(p.EntryPoint.Candidates))
+			copy(epCopy.Candidates, p.EntryPoint.Candidates)
+		}
+		if p.EntryPoint.Warnings != nil {
+			epCopy.Warnings = make([]string, len(p.EntryPoint.Warnings))
+			copy(epCopy.Warnings, p.EntryPoint.Warnings)
+		}
+		cp.EntryPoint = &epCopy
 	}
 
 	// Deep copy EnvironmentVariables
@@ -149,17 +169,19 @@ func RedactString(s string) string {
 
 // BuildPlanner coordinates repository analysis, runtime resolution, and strategy selection.
 type BuildPlanner struct {
-	analyzer         *RepositoryAnalyzer
-	runtimeResolver  *RuntimeResolver
-	strategySelector *BuilderStrategySelector
+	analyzer           *RepositoryAnalyzer
+	runtimeResolver    *RuntimeResolver
+	strategySelector   *BuilderStrategySelector
+	entryPointResolver *EntryPointResolver
 }
 
 // NewBuildPlanner constructs a new BuildPlanner.
 func NewBuildPlanner() *BuildPlanner {
 	return &BuildPlanner{
-		analyzer:         NewRepositoryAnalyzer(),
-		runtimeResolver:  NewRuntimeResolver(),
-		strategySelector: NewBuilderStrategySelector(),
+		analyzer:           NewRepositoryAnalyzer(),
+		runtimeResolver:    NewRuntimeResolver(),
+		strategySelector:   NewBuilderStrategySelector(),
+		entryPointResolver: NewEntryPointResolver(),
 	}
 }
 
@@ -202,6 +224,12 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 	// Step 4: Dockerfile Recommendation (Phase 2 Component B)
 	recommendation := p.strategySelector.EvaluateDockerfileRecommendation(analysis, builderSel.SelectedBuilder)
 
+	// Step 4.5: Entry Point Resolution & Execution Mode Detection (Phase 2.5)
+	entryPointRes, err := p.entryPointResolver.ResolveEntryPoints(ctx, effectiveDir, analysis, userCfg)
+	if err != nil {
+		return nil, fmt.Errorf("build planner: entry point resolution failed: %w", err)
+	}
+
 	// Step 5: Command and Port Resolution
 	preserveEntrypoint := true
 	startCmd := ""
@@ -215,6 +243,9 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 			startCmd = rjStart
 		} else if procStart := readProcfileWeb(effectiveDir); procStart != "" {
 			startCmd = procStart
+		} else if entryPointRes != nil && entryPointRes.SelectedCommand != "" {
+			startCmd = entryPointRes.SelectedCommand
+			preserveEntrypoint = false
 		}
 	}
 
@@ -243,6 +274,11 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 		}
 	}
 
+	execMode := ExecutionModeApplication
+	if entryPointRes != nil && entryPointRes.ExecutionMode != "" {
+		execMode = entryPointRes.ExecutionMode
+	}
+
 	plan := &ResolvedBuildPlan{
 		ID:                      fmt.Sprintf("plan-%d", time.Now().UnixNano()),
 		SandboxID:               sandboxID,
@@ -260,6 +296,8 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 		BuildCommand:            buildCmd,
 		InstallCommand:          installCmd,
 		PreserveImageEntrypoint: preserveEntrypoint,
+		ExecutionMode:           execMode,
+		EntryPoint:              entryPointRes,
 		EnvironmentVariables:    envVars,
 		CreatedAt:               time.Now().UTC(),
 	}
