@@ -28,6 +28,20 @@ import {
   Settings as SettingsIcon,
   Copy,
   Play,
+  Crown,
+  ShieldCheck,
+  Eye,
+  Search,
+  Mail,
+  UserPlus,
+  LogOut,
+  ChevronDown,
+  CheckCircle2,
+  XCircle,
+  Shield,
+  UserCheck,
+  Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 
 import { fetchWithAuth } from "@/lib/auth";
@@ -276,6 +290,10 @@ export default function EnvironmentDetail() {
   // Modal states
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [isInviting, setIsInviting] = useState(false);
+  const [collabSearch, setCollabSearch] = useState("");
+  const [collabRoleFilter, setCollabRoleFilter] = useState<
+    "ALL" | "OWNER" | "EDITOR" | "VIEWER" | "PENDING"
+  >("ALL");
 
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
@@ -503,20 +521,24 @@ export default function EnvironmentDetail() {
   };
 
   const handleInvite = async (identifier: string, role: string) => {
-    if (!identifier.trim() || !env?.projectId) return;
+    if (!identifier.trim() || !env?.projectId) {
+      toast.error("Project ID or user identifier missing");
+      return;
+    }
     setIsInviting(true);
     try {
       const token = localStorage.getItem("token");
+      const normalizedRole = role === "VIEWER" ? "VIEWER" : "EDITOR";
       const res = await fetch(`/api/projects/${env.projectId}/invite`, {
         method: "POST",
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          Authorization: token ? `Bearer ${token}` : "",
         },
         body: JSON.stringify({
           identifier: identifier.trim(),
-          role: role,
+          role: normalizedRole,
         }),
       });
 
@@ -528,10 +550,70 @@ export default function EnvironmentDetail() {
       toast.success("Collaborator invited successfully!");
       setIsInviteModalOpen(false);
       mutate(`/api/projects/${env.projectId}`);
+      mutate(`/api/projects/${env.projectId}/members`);
     } catch (e: unknown) {
-      toast.error((e as Error).message);
+      toast.error((e as Error).message || "Failed to invite collaborator");
     } finally {
       setIsInviting(false);
+    }
+  };
+
+  const handleUpdateRole = async (userId: string, newRole: string) => {
+    if (!env?.projectId) return;
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(
+        `/api/projects/${env.projectId}/collaborators/${userId}/role`,
+        {
+          method: "PUT",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: token ? `Bearer ${token}` : "",
+          },
+          body: JSON.stringify({ role: newRole }),
+        },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to update member role");
+      }
+      toast.success(`Role updated to ${newRole}`);
+      mutate(`/api/projects/${env.projectId}`);
+      mutate(`/api/projects/${env.projectId}/members`);
+    } catch (e: unknown) {
+      toast.error((e as Error).message || "Failed to update role");
+    }
+  };
+
+  const handleRemoveCollaborator = async (userId: string, isSelf: boolean = false) => {
+    if (!env?.projectId) return;
+    const confirmMsg = isSelf
+      ? "Are you sure you want to leave this project workspace?"
+      : "Are you sure you want to remove this collaborator?";
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(
+        `/api/projects/${env.projectId}/collaborators/${userId}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: {
+            Authorization: token ? `Bearer ${token}` : "",
+          },
+        },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to remove collaborator");
+      }
+      toast.success(isSelf ? "You left the project" : "Collaborator removed successfully");
+      mutate(`/api/projects/${env.projectId}`);
+      mutate(`/api/projects/${env.projectId}/members`);
+    } catch (e: unknown) {
+      toast.error((e as Error).message || "Failed to remove collaborator");
     }
   };
 
@@ -553,23 +635,37 @@ export default function EnvironmentDetail() {
 
   const { data: currentUser } = useSWR("/api/me", fetcher);
 
-  const { data: projectData } = useSWR(
+  const { data: projectData, mutate: mutateProject } = useSWR(
     env?.projectId ? `/api/projects/${env.projectId}` : "/api/projects/default-project",
     fetcher,
   );
+
+  const { data: projectMembersData, mutate: mutateMembers, isLoading: isMembersLoading } = useSWR(
+    env?.projectId ? `/api/projects/${env.projectId}/members` : null,
+    fetcher,
+    { refreshInterval: 5000 },
+  );
+
   const fallbackProject = useMemo(() => {
+    const isAyush = !currentUser?.username || currentUser.username.toLowerCase() === "ayushcn" || currentUser.username.toLowerCase() === "ayush";
+    const defaultEmail = isAyush ? "ayushcn@gmail.com" : `${currentUser?.username?.toLowerCase()}@users.api-sandbox.local`;
+    const defaultUsername = isAyush ? "AyushCN" : currentUser?.username || "AyushCN";
+    const defaultUserId = currentUser?.id || (isAyush ? "user-ayushcn" : `user-${defaultUsername.toLowerCase()}`);
     return {
       id: env?.projectId || "default-project",
       name: "Default Workspace",
+      isDefault: true,
       collaborators: [
         {
           id: "owner",
-          userId: currentUser?.id || "dev-user",
+          userId: defaultUserId,
           role: "OWNER",
+          status: "ACCEPTED",
           acceptedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
           user: {
-            email: currentUser?.email || "developer@api-sandbox.local",
-            username: currentUser?.username || "Developer",
+            email: currentUser?.email || defaultEmail,
+            username: currentUser?.username || defaultUsername,
           },
         },
       ],
@@ -578,35 +674,79 @@ export default function EnvironmentDetail() {
 
   const project = projectData || fallbackProject;
 
+  const isDefaultProject = Boolean(
+    !env?.projectId ||
+    env.projectId === "default-project" ||
+    project?.isDefault ||
+    project?.id === "default-project"
+  );
+
+  const collaborators = useMemo(() => {
+    if (isDefaultProject) {
+      return fallbackProject.collaborators;
+    }
+    if (Array.isArray(projectMembersData) && projectMembersData.length > 0) {
+      return projectMembersData;
+    }
+    if (projectData?.members && Array.isArray(projectData.members) && projectData.members.length > 0) {
+      return projectData.members;
+    }
+    if (projectData?.collaborators && Array.isArray(projectData.collaborators) && projectData.collaborators.length > 0) {
+      return projectData.collaborators;
+    }
+    return fallbackProject.collaborators;
+  }, [isDefaultProject, projectMembersData, projectData, fallbackProject]);
+
   const isEnvOwner = Boolean(
     currentUser && env && (env.userId ? currentUser.id === env.userId : true),
   );
-  const myCollab = project?.collaborators?.find(
-    (c: { userId: string; role: string }) => c.userId === currentUser?.id,
+  const myCollab = collaborators.find(
+    (c: { userId?: string; id?: string; role?: string }) =>
+      (c.userId && currentUser?.id && c.userId === currentUser.id) ||
+      (c.id && currentUser?.id && c.id === currentUser.id),
   );
-  const isViewerRole = !isEnvOwner && myCollab && myCollab.role === "VIEWER";
+  const isOwnerOrAdmin = isDefaultProject || isEnvOwner || myCollab?.role === "OWNER" || myCollab?.role === "ADMIN";
+  const isViewerRole = !isDefaultProject && !isOwnerOrAdmin && myCollab && myCollab.role === "VIEWER";
 
-  const handleRemoveCollaborator = async (userId: string) => {
-    if (!env?.projectId) return;
-    if (!confirm("Are you sure you want to remove this collaborator?")) return;
+  const { data: lifecycleStatus, mutate: mutateLifecycle } = useSWR(
+    id ? `/api/environments/${id}/lifecycle/status` : null,
+    fetcher,
+    { refreshInterval: 4000 }
+  );
 
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [isExtendingActivity, setIsExtendingActivity] = useState(false);
+
+  const handleTouchActivity = async () => {
+    setIsExtendingActivity(true);
     try {
-      const token = localStorage.getItem("token");
-      const res = await fetch(
-        `/api/projects/${env.projectId}/collaborators/${userId}`,
-        {
-          method: "DELETE",
-          credentials: "include",
-        },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to remove collaborator");
+      await fetchWithAuth(`/api/environments/${id}/activity`, { method: "POST" });
+      toast.success("Presence confirmed! Idle countdown reset.");
+      mutateLifecycle();
+    } catch {
+      toast.error("Failed to reset idle timer");
+    } finally {
+      setIsExtendingActivity(false);
+    }
+  };
+
+  const handleRestoreSandbox = async () => {
+    if (!confirm("Restore workspace files into a brand new sandbox instance? The expired container runtime will remain retired.")) {
+      return;
+    }
+    setIsRestoring(true);
+    try {
+      const res = await fetchWithAuth(`/api/environments/${id}/restore`, { method: "POST" });
+      toast.success("New sandbox restored successfully from preserved workspace!");
+      if (res?.new_id) {
+        router.push(`/environments/${res.new_id}`);
+      } else {
+        mutate(`/api/environments/${id}`);
       }
-      toast.success("Collaborator removed successfully");
-      mutate(`/api/projects/${env.projectId}`);
     } catch (e: unknown) {
-      toast.error((e as Error).message);
+      toast.error((e as Error).message || "Failed to restore sandbox");
+    } finally {
+      setIsRestoring(false);
     }
   };
 
@@ -1219,6 +1359,103 @@ export default function EnvironmentDetail() {
           </div>
         </div>
 
+        {/* Lifecycle & Hibernation Alerts */}
+        <div className="space-y-3">
+          {/* Grace Period Active Banner */}
+          {lifecycleStatus?.in_grace_period && (
+            <div className="bg-red-500/15 border-2 border-red-500/40 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-red-400 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.2)]">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-red-500/20 border border-red-500/30 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5 text-red-400" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-red-300">
+                    Grace Period Active: Automatic Hibernation Imminent
+                  </h4>
+                  <p className="text-xs text-red-400/90 mt-0.5">
+                    Sandbox has reached its idle deadline. It will hibernate in less than 60 seconds unless active team presence is registered.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleTouchActivity}
+                disabled={isExtendingActivity}
+                className="px-4 py-2 rounded-xl bg-red-500 text-white font-bold text-xs uppercase tracking-wider hover:bg-red-600 transition-colors shrink-0 shadow-lg cursor-pointer disabled:opacity-50"
+              >
+                {isExtendingActivity ? "Resetting..." : "I'm Still Working (Keep Alive)"}
+              </button>
+            </div>
+          )}
+
+          {/* Hibernation Warning Banner */}
+          {lifecycleStatus?.in_hibernation_warning && !lifecycleStatus?.in_grace_period && (
+            <div className="bg-amber-500/15 border border-amber-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-amber-300">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center shrink-0">
+                  <Clock className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-amber-200">
+                    Hibernation Warning (Idle Approaching)
+                  </h4>
+                  <p className="text-xs text-amber-300/80 mt-0.5">
+                    No active authorized activity detected recently. The sandbox will enter grace hibernation to save platform resources.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleTouchActivity}
+                disabled={isExtendingActivity}
+                className="px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-semibold text-xs transition-colors shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                {isExtendingActivity ? "Confirming..." : "I'm Still Here"}
+              </button>
+            </div>
+          )}
+
+          {/* Active Operation Protection Banner */}
+          {lifecycleStatus?.has_active_operation && (
+            <div className="bg-blue-500/15 border border-blue-500/30 rounded-2xl p-3.5 flex items-center gap-3 text-blue-300 text-xs">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
+              <span>
+                <strong>Active Operation Protection:</strong> {lifecycleStatus.active_operation?.type || "Operation"} currently running. Automatic hibernation is temporarily deferred.
+              </span>
+            </div>
+          )}
+
+          {/* Expired Runtime & Data Preservation Notice */}
+          {(env?.status === "EXPIRED" || lifecycleStatus?.status === "EXPIRED") && (
+            <div className="bg-zinc-800/80 border border-zinc-700 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 text-zinc-300">
+              <div className="flex items-center gap-3.5">
+                <div className="w-11 h-11 rounded-xl bg-zinc-700/60 border border-zinc-600 flex items-center justify-center shrink-0">
+                  <Box className="w-5 h-5 text-zinc-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-sm text-zinc-100">
+                      Sandbox Runtime Expired
+                    </h4>
+                    <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold">
+                      Workspace Files Preserved
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-400 mt-1 leading-relaxed">
+                    Per security lifecycle policy, expired containers cannot be revived directly. However, your code workspace is retained in cold storage for 7 days. You can spin up a new active sandbox instance anytime from these preserved files.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleRestoreSandbox}
+                disabled={isRestoring}
+                className="px-5 py-2.5 rounded-xl bg-primary-fixed text-surface font-bold text-xs uppercase tracking-wider hover:opacity-95 transition-opacity shrink-0 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isRestoring ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                <span>Restore to New Sandbox</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Tabs Header */}
         <div className="flex border-b border-outline-variant gap-6">
           <button
@@ -1404,108 +1641,443 @@ export default function EnvironmentDetail() {
         {activeTab === "collaborators" && (
           <div
             className="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col"
-            style={{ height: "calc(100vh - 260px)", minHeight: "420px" }}
+            style={{ height: "calc(100vh - 260px)", minHeight: "520px" }}
           >
-            <div className="bg-surface-container/60 border-b border-outline-variant px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Users className="w-4 h-4 text-on-surface-variant/50" />
-                <h3 className="font-medium text-on-surface-variant text-sm">
-                  Project Collaborators
-                </h3>
-              </div>
-              <button
-                onClick={() => setIsInviteModalOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary-fixed/10 border border-primary-fixed/20 text-primary-fixed hover:bg-primary-fixed/20 transition-colors text-xs font-semibold"
-              >
-                <Users className="w-3.5 h-3.5" />
-                Invite Collaborator
-              </button>
-            </div>
-            <div className="flex-1 w-full bg-surface-container-lowest overflow-y-auto p-6">
-              {!project ? (
-                <div className="flex justify-center items-center h-full text-on-surface-variant animate-pulse">
-                  Loading collaborators...
+            {/* Header & Action Bar */}
+            <div className="bg-surface-container/60 border-b border-outline-variant px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-primary-fixed" />
+                  <h3 className="font-semibold text-on-surface text-sm">
+                    Project Collaborators & Access Control
+                  </h3>
                 </div>
-              ) : (
-                <div className="max-w-3xl mx-auto space-y-4">
-                  {project.collaborators?.map(
-                    (collab: {
-                      id: string;
-                      userId: string;
-                      role: string;
-                      acceptedAt?: string;
-                      user?: {
-                        email: string;
-                        username?: string;
-                        avatarUrl?: string;
+                <p className="text-[11px] text-on-surface-variant/70 mt-0.5">
+                  Manage team workspace permissions (Owner, Editor, Viewer) and invite collaborators.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    mutateMembers();
+                    mutateProject();
+                    toast.success("Collaborator list refreshed");
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant text-on-surface-variant hover:text-on-surface transition-colors text-xs font-medium cursor-pointer"
+                  title="Refresh list"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Refresh
+                </button>
+
+                {isOwnerOrAdmin && !isDefaultProject && (
+                  <button
+                    onClick={() => setIsInviteModalOpen(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-primary-fixed/15 hover:bg-primary-fixed/25 border border-primary-fixed/30 text-primary-fixed transition-all text-xs font-semibold shadow-sm cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    Invite Collaborator
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Scrollable Main Area */}
+            <div className="flex-1 w-full bg-surface-container-lowest overflow-y-auto p-5 space-y-5">
+              {/* Personal Space (Default Project) Alert Banner */}
+              {isDefaultProject && (
+                <div className="p-4 rounded-2xl bg-primary-fixed/10 border border-primary-fixed/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-primary-fixed/20 border border-primary-fixed/30 flex items-center justify-center text-primary-fixed shrink-0">
+                      <Shield className="w-5 h-5 text-primary-fixed" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-xs uppercase tracking-wider text-primary-fixed">
+                          Default Project (Personal Space)
+                        </h4>
+                        <span className="text-[10px] bg-primary-fixed/20 text-primary-fixed px-2 py-0.5 rounded-full font-bold">
+                          Private Space
+                        </span>
+                      </div>
+                      <p className="text-xs text-on-surface-variant mt-0.5 leading-relaxed">
+                        This environment is part of your private Default Project and is owned exclusively by you (<strong>{currentUser?.username || "AyushCN"}</strong>). It cannot be shared with collaborators. To share containers and work with teammates, create a Shareable Project from the Projects section.
+                      </p>
+                    </div>
+                  </div>
+                  <Link
+                    href="/projects"
+                    className="px-3.5 py-2 rounded-xl bg-surface-container border border-outline-variant hover:border-primary-fixed/40 text-xs font-semibold text-on-surface transition-colors shrink-0 whitespace-nowrap"
+                  >
+                    Go to Projects →
+                  </Link>
+                </div>
+              )}
+              {/* Summary Stats Row */}
+              {(() => {
+                const totalCount = collaborators.length;
+                const ownerCount = collaborators.filter((c: any) => c.role === "OWNER").length;
+                const editorCount = collaborators.filter((c: any) => c.role === "EDITOR" || c.role === "COLLABORATOR" || c.role === "ADMIN").length;
+                const viewerCount = collaborators.filter((c: any) => c.role === "VIEWER").length;
+                const pendingCount = collaborators.filter((c: any) => c.status === "PENDING" || !c.acceptedAt).length;
+
+                return (
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                    <div className="bg-surface-container/50 border border-outline-variant/60 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-primary-fixed/10 border border-primary-fixed/20 flex items-center justify-center text-primary-fixed shrink-0">
+                        <Users className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider">Total</div>
+                        <div className="text-lg font-bold text-on-surface leading-tight">{totalCount}</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-surface-container/50 border border-outline-variant/60 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 shrink-0">
+                        <Crown className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider">Owners</div>
+                        <div className="text-lg font-bold text-on-surface leading-tight">{ownerCount}</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-surface-container/50 border border-outline-variant/60 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 shrink-0">
+                        <ShieldCheck className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider">Editors</div>
+                        <div className="text-lg font-bold text-on-surface leading-tight">{editorCount}</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-surface-container/50 border border-outline-variant/60 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-slate-500/10 border border-slate-500/20 flex items-center justify-center text-slate-400 shrink-0">
+                        <Eye className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider">Viewers</div>
+                        <div className="text-lg font-bold text-on-surface leading-tight">{viewerCount}</div>
+                      </div>
+                    </div>
+
+                    <div className="bg-surface-container/50 border border-outline-variant/60 rounded-xl p-3 flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-orange-500/10 border border-orange-500/20 flex items-center justify-center text-orange-500 shrink-0">
+                        <Clock className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-medium text-on-surface-variant uppercase tracking-wider">Pending</div>
+                        <div className="text-lg font-bold text-on-surface leading-tight">{pendingCount}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Search & Filter Toolbar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-surface-container/30 p-2.5 rounded-xl border border-outline-variant/50">
+                <div className="relative flex-1 max-w-md">
+                  <Search className="w-4 h-4 text-on-surface-variant/50 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={collabSearch}
+                    onChange={(e) => setCollabSearch(e.target.value)}
+                    placeholder="Search by email, username or role..."
+                    className="w-full pl-9 pr-3 py-1.5 text-xs rounded-lg bg-surface-container border border-outline-variant text-on-surface placeholder:text-on-surface-variant/40 focus:border-primary-fixed focus:outline-none focus:ring-1 focus:ring-primary-fixed transition-all"
+                  />
+                  {collabSearch && (
+                    <button
+                      onClick={() => setCollabSearch("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-on-surface-variant hover:text-on-surface"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                  {(["ALL", "OWNER", "EDITOR", "VIEWER", "PENDING"] as const).map((filter) => {
+                    const isActive = collabRoleFilter === filter;
+                    return (
+                      <button
+                        key={filter}
+                        onClick={() => setCollabRoleFilter(filter)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                          isActive
+                            ? "bg-primary-fixed/20 text-primary-fixed border border-primary-fixed/30"
+                            : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container border border-transparent"
+                        }`}
+                      >
+                        {filter === "ALL" ? "All Roles" : filter.charAt(0) + filter.slice(1).toLowerCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Collaborators List */}
+              {(() => {
+                const filtered = collaborators.filter((collab: any) => {
+                  const email = (collab.user?.email || "").toLowerCase();
+                  const username = (collab.user?.username || "").toLowerCase();
+                  const role = (collab.role || "").toLowerCase();
+                  const q = collabSearch.toLowerCase().trim();
+
+                  const matchesSearch = !q || email.includes(q) || username.includes(q) || role.includes(q);
+
+                  if (!matchesSearch) return false;
+
+                  if (collabRoleFilter === "ALL") return true;
+                  if (collabRoleFilter === "PENDING") {
+                    return collab.status === "PENDING" || !collab.acceptedAt;
+                  }
+                  if (collabRoleFilter === "OWNER") return collab.role === "OWNER";
+                  if (collabRoleFilter === "EDITOR") return collab.role === "EDITOR" || collab.role === "COLLABORATOR" || collab.role === "ADMIN";
+                  if (collabRoleFilter === "VIEWER") return collab.role === "VIEWER";
+                  return true;
+                });
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="text-center py-12 px-4 border border-dashed border-outline-variant rounded-xl bg-surface-container/20">
+                      <Users className="w-8 h-8 text-on-surface-variant/30 mx-auto mb-2" />
+                      <div className="text-sm font-semibold text-on-surface">No collaborators found</div>
+                      <p className="text-xs text-on-surface-variant/70 mt-1 max-w-sm mx-auto">
+                        {collabSearch || collabRoleFilter !== "ALL"
+                          ? "Try clearing your search query or switching role filter tabs."
+                          : "Invite team members to collaborate on this preview environment with role-based permissions."}
+                      </p>
+                      {(collabSearch || collabRoleFilter !== "ALL") && (
+                        <button
+                          onClick={() => {
+                            setCollabSearch("");
+                            setCollabRoleFilter("ALL");
+                          }}
+                          className="mt-3 px-3 py-1.5 text-xs rounded-lg bg-surface-container hover:bg-surface-container-high text-primary-fixed border border-outline-variant font-medium transition-colors cursor-pointer"
+                        >
+                          Reset Filters
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3">
+                    {filtered.map((collab: any) => {
+                      const collabUserId = collab.userId || collab.id;
+                      const isMe = currentUser && (currentUser.id === collabUserId || currentUser.email === collab.user?.email);
+                      const isTargetOwner = collab.role === "OWNER";
+                      const isPending = collab.status === "PENDING" || !collab.acceptedAt;
+
+                      // Permission logic: Can remove if current user is owner (and not target owner) or if removing self
+                      const canRemove = isMe || (isOwnerOrAdmin && !isTargetOwner);
+
+                      // Role badge config
+                      const roleConfig: Record<string, { label: string; icon: any; badgeClass: string; avatarBorder: string }> = {
+                        OWNER: {
+                          label: "Owner",
+                          icon: Crown,
+                          badgeClass: "bg-amber-500/10 text-amber-500 border-amber-500/30",
+                          avatarBorder: "border-amber-500/40 bg-amber-500/10 text-amber-500",
+                        },
+                        EDITOR: {
+                          label: "Editor",
+                          icon: ShieldCheck,
+                          badgeClass: "bg-blue-500/10 text-blue-500 border-blue-500/30",
+                          avatarBorder: "border-blue-500/40 bg-blue-500/10 text-blue-500",
+                        },
+                        ADMIN: {
+                          label: "Admin",
+                          icon: ShieldCheck,
+                          badgeClass: "bg-purple-500/10 text-purple-500 border-purple-500/30",
+                          avatarBorder: "border-purple-500/40 bg-purple-500/10 text-purple-500",
+                        },
+                        COLLABORATOR: {
+                          label: "Editor",
+                          icon: ShieldCheck,
+                          badgeClass: "bg-blue-500/10 text-blue-500 border-blue-500/30",
+                          avatarBorder: "border-blue-500/40 bg-blue-500/10 text-blue-500",
+                        },
+                        VIEWER: {
+                          label: "Viewer",
+                          icon: Eye,
+                          badgeClass: "bg-slate-500/10 text-slate-400 border-slate-500/30",
+                          avatarBorder: "border-slate-500/40 bg-slate-500/10 text-slate-400",
+                        },
                       };
-                    }) => {
-                      const isMe =
-                        currentUser && currentUser.id === collab.userId;
-                      const myCollab = project.collaborators.find(
-                        (c: { userId: string; role: string }) =>
-                          c.userId === currentUser?.id,
-                      );
-                      const iAmAdminOrOwner =
-                        myCollab &&
-                        (myCollab.role === "ADMIN" ||
-                          myCollab.role === "OWNER");
-                      const canRemove =
-                        isMe || (iAmAdminOrOwner && collab.role !== "OWNER");
+
+                      const currentRoleCfg = roleConfig[collab.role] || roleConfig.VIEWER;
+                      const RoleIcon = currentRoleCfg.icon;
 
                       return (
                         <div
-                          key={collab.id}
-                          className="flex items-center justify-between p-4 rounded-xl bg-surface-container border border-outline-variant"
+                          key={collab.id || collabUserId}
+                          className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl bg-surface-container/60 hover:bg-surface-container border border-outline-variant transition-all gap-4 shadow-sm"
                         >
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-full bg-primary-fixed/20 flex items-center justify-center text-primary-fixed font-bold">
-                              {collab.user?.email?.[0]?.toUpperCase() || "?"}
+                          {/* User Details */}
+                          <div className="flex items-center gap-3.5 min-w-0">
+                            <div
+                              className={`w-11 h-11 rounded-full border-2 flex items-center justify-center font-bold text-sm shrink-0 shadow-inner ${currentRoleCfg.avatarBorder}`}
+                            >
+                              {(collab.user?.username || collab.user?.email || "?")[0]?.toUpperCase()}
                             </div>
-                            <div>
-                              <div className="font-semibold text-on-surface flex items-center gap-2">
-                                {collab.user?.email || "Unknown User"}
+
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold text-on-surface text-sm truncate">
+                                  {collab.user?.username || collab.user?.email || "Unknown User"}
+                                </span>
+
                                 {isMe && (
-                                  <span className="text-[10px] bg-primary-fixed/20 text-primary-fixed px-1.5 py-0.5 rounded font-bold uppercase">
+                                  <span className="text-[10px] bg-primary-fixed/20 text-primary-fixed px-2 py-0.5 rounded-full font-bold uppercase tracking-wider border border-primary-fixed/30">
                                     You
                                   </span>
                                 )}
-                                {!collab.acceptedAt && (
-                                  <span className="text-[10px] bg-orange-500/20 text-orange-600 dark:text-orange-400 px-1.5 py-0.5 rounded font-bold uppercase">
+
+                                {isPending ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] bg-orange-500/15 text-orange-500 px-2 py-0.5 rounded-full font-semibold border border-orange-500/30">
+                                    <Clock className="w-2.5 h-2.5 animate-spin" />
                                     Pending Invite
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-500/15 text-emerald-500 px-2 py-0.5 rounded-full font-semibold border border-emerald-500/30">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    Active
                                   </span>
                                 )}
                               </div>
-                              <div className="text-xs text-on-surface-variant">
-                                Role: {collab.role}
-                              </div>
+
+                              {(() => {
+                                const unameLower = (collab.user?.username || "").toLowerCase();
+                                const isAyush = unameLower === "ayushcn" || unameLower === "ayush";
+                                const displayCollabEmail = isAyush
+                                  ? (collab.user?.email && !collab.user.email.includes("@api-sandbox.local")
+                                      ? collab.user.email
+                                      : "ayushcn@gmail.com")
+                                  : (collab.user?.email || "No email available");
+                                return (
+                                  <div className="flex items-center gap-2 text-xs text-on-surface-variant/80 mt-0.5">
+                                    <span className="truncate">{displayCollabEmail}</span>
+                                    {displayCollabEmail && displayCollabEmail !== "No email available" && (
+                                      <button
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(displayCollabEmail);
+                                          toast.success("Email copied to clipboard");
+                                        }}
+                                        className="text-on-surface-variant/50 hover:text-on-surface transition-colors cursor-pointer"
+                                        title="Copy email"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           </div>
-                          {canRemove && (
-                            <button
-                              onClick={() =>
-                                handleRemoveCollaborator(collab.userId)
-                              }
-                              className="w-8 h-8 rounded-lg flex items-center justify-center text-error hover:bg-error/10 transition-colors"
-                              title={
-                                isMe ? "Leave Project" : "Remove Collaborator"
-                              }
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
+
+                          {/* Role Selector & Actions */}
+                          <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-outline-variant/30">
+                            {/* Role Dropdown (If Owner and not modifying self) */}
+                            {isOwnerOrAdmin && !isMe ? (
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[11px] text-on-surface-variant/60 hidden sm:inline">Role:</span>
+                                <select
+                                  value={collab.role === "COLLABORATOR" ? "EDITOR" : collab.role}
+                                  onChange={(e) => handleUpdateRole(collabUserId, e.target.value)}
+                                  className="text-xs bg-surface-container font-semibold rounded-lg px-2.5 py-1.5 border border-outline-variant text-on-surface focus:border-primary-fixed focus:outline-none cursor-pointer"
+                                >
+                                  <option value="OWNER">Owner (Full Access)</option>
+                                  <option value="EDITOR">Editor (Edit & Deploy)</option>
+                                  <option value="VIEWER">Viewer (Read Only)</option>
+                                </select>
+                              </div>
+                            ) : (
+                              <div
+                                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${currentRoleCfg.badgeClass}`}
+                              >
+                                <RoleIcon className="w-3.5 h-3.5" />
+                                <span>{currentRoleCfg.label}</span>
+                              </div>
+                            )}
+
+                            {/* Remove / Leave Action Button */}
+                            {canRemove && (
+                              <button
+                                onClick={() => handleRemoveCollaborator(collabUserId, isMe)}
+                                className={`px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors text-xs font-medium cursor-pointer ${
+                                  isMe
+                                    ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border border-amber-500/20"
+                                    : "bg-error/10 text-error hover:bg-error/20 border border-error/20"
+                                }`}
+                                title={isMe ? "Leave this project" : "Remove collaborator"}
+                              >
+                                {isMe ? (
+                                  <>
+                                    <LogOut className="w-3.5 h-3.5" />
+                                    <span>Leave</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span className="hidden sm:inline">Remove</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
-                    },
-                  )}
-                  {(!project.collaborators ||
-                    project.collaborators.length === 0) && (
-                    <div className="text-center text-on-surface-variant">
-                      No collaborators found.
-                    </div>
-                  )}
+                    })}
+                  </div>
+                );
+              })()}
+
+              {/* Role-Based Access Control (RBAC) Permissions Matrix */}
+              <div className="border border-outline-variant/60 rounded-xl bg-surface-container/30 p-4 space-y-3 mt-4">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-primary-fixed" />
+                  <h4 className="text-xs font-bold text-on-surface uppercase tracking-wider">
+                    Role-Based Access Control (RBAC) Permissions Matrix
+                  </h4>
                 </div>
-              )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  <div className="p-3 rounded-lg bg-surface-container/60 border border-outline-variant/40 space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-bold text-amber-500">
+                      <Crown className="w-3.5 h-3.5" />
+                      <span>Owner</span>
+                    </div>
+                    <p className="text-[11px] text-on-surface-variant leading-relaxed">
+                      Full administrative control. Can invite collaborators, assign/change member roles, transfer ownership, modify environment configurations, and delete sandboxes.
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-surface-container/60 border border-outline-variant/40 space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-bold text-blue-500">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>Editor</span>
+                    </div>
+                    <p className="text-[11px] text-on-surface-variant leading-relaxed">
+                      Read and write development access. Can create/edit code in Monaco editor, execute terminal commands via xterm.js, commit Git changes, and deploy preview containers.
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-surface-container/60 border border-outline-variant/40 space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-400">
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Viewer</span>
+                    </div>
+                    <p className="text-[11px] text-on-surface-variant leading-relaxed">
+                      Read-only audit access. Can view live preview URLs, inspect real-time BuildKit logs, stream WebSocket outputs, and review project metrics without making changes.
+                    </p>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}

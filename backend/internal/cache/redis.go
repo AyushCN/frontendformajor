@@ -77,7 +77,198 @@ func (r *Redis) IsIdle(ctx context.Context, sandboxID string) bool {
 // Clear removes a sandbox's marker (used when hibernating so a fresh wake is
 // counted as brand-new activity).
 func (r *Redis) Clear(ctx context.Context, sandboxID string) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	_ = r.ClearHibernationState(ctx, sandboxID)
+	// Clear all user activity keys for this sandbox
+	pattern := fmt.Sprintf("act:%s:*", sandboxID)
+	if keys, err := r.client.Keys(ctx, pattern).Result(); err == nil && len(keys) > 0 {
+		_ = r.client.Del(ctx, keys...).Err()
+	}
 	return r.client.Del(ctx, lastRequestKey(sandboxID)).Err()
+}
+
+// ---- Multi-user activity & active operations ----------------------------
+
+func userActivityKey(sandboxID, userID string) string {
+	return fmt.Sprintf("act:%s:%s", sandboxID, userID)
+}
+
+func activeOperationKey(sandboxID string) string {
+	return "op:" + sandboxID
+}
+
+func hibernationWarningKey(sandboxID string) string {
+	return "warn:hibernation:" + sandboxID
+}
+
+func hibernationGraceKey(sandboxID string) string {
+	return "grace:hibernation:" + sandboxID
+}
+
+// ActiveOperation holds metadata about an in-flight operation that temporarily
+// protects a sandbox from idle hibernation.
+type ActiveOperation struct {
+	Type               string    `json:"type"`
+	UserID             string    `json:"user_id"`
+	StartedAt          time.Time `json:"started_at"`
+	MaxDurationSeconds int64     `json:"max_duration_seconds"`
+}
+
+// AllowedOperationTypes are valid, recognized bounded operations.
+var AllowedOperationTypes = map[string]bool{
+	"BUILD":              true,
+	"DEPENDENCY_INSTALL": true,
+	"GIT_PULL":           true,
+	"GIT_COMMIT":         true,
+	"UPLOAD":             true,
+	"MIGRATION":          true,
+}
+
+// TouchUserActivity records activity for a specific authorized user.
+// Bumps both the per-user activity key and the aggregate last-request key.
+// Also clears any active hibernation warning or grace period.
+func (r *Redis) TouchUserActivity(ctx context.Context, sandboxID, userID string, ttlSeconds int) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	dur := time.Duration(ttlSeconds) * time.Second
+	now := time.Now().Unix()
+
+	pipe := r.client.Pipeline()
+	pipe.Set(ctx, lastRequestKey(sandboxID), now, dur)
+	if userID != "" {
+		pipe.Set(ctx, userActivityKey(sandboxID, userID), now, dur)
+	}
+	pipe.Del(ctx, hibernationWarningKey(sandboxID))
+	pipe.Del(ctx, hibernationGraceKey(sandboxID))
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("cache: touching user activity: %w", err)
+	}
+	return nil
+}
+
+// GetIdleTTL returns the remaining TTL of the sandbox's idle timer, or 0 if expired/idle.
+func (r *Redis) GetIdleTTL(ctx context.Context, sandboxID string) time.Duration {
+	if r == nil || r.client == nil {
+		return 0
+	}
+	ttl, err := r.client.TTL(ctx, lastRequestKey(sandboxID)).Result()
+	if err != nil || ttl < 0 {
+		return 0
+	}
+	return ttl
+}
+
+// HasActiveUserActivity checks if ANY authorized user is currently active on the sandbox.
+func (r *Redis) HasActiveUserActivity(ctx context.Context, sandboxID string) bool {
+	if r == nil || r.client == nil {
+		return false
+	}
+	pattern := fmt.Sprintf("act:%s:*", sandboxID)
+	keys, err := r.client.Keys(ctx, pattern).Result()
+	if err != nil {
+		return false
+	}
+	return len(keys) > 0
+}
+
+// StartOperation registers a bounded active operation.
+func (r *Redis) StartOperation(ctx context.Context, sandboxID string, opType string, userID string, maxDuration time.Duration) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	if !AllowedOperationTypes[opType] {
+		return fmt.Errorf("invalid operation type: %s", opType)
+	}
+	if maxDuration <= 0 || maxDuration > 30*time.Minute {
+		maxDuration = 15 * time.Minute // default 15 min bound
+	}
+	op := ActiveOperation{
+		Type:               opType,
+		UserID:             userID,
+		StartedAt:          time.Now().UTC(),
+		MaxDurationSeconds: int64(maxDuration.Seconds()),
+	}
+	data, err := json.Marshal(op)
+	if err != nil {
+		return err
+	}
+	return r.client.Set(ctx, activeOperationKey(sandboxID), data, maxDuration).Err()
+}
+
+// GetActiveOperation checks if an active operation is running and not expired.
+func (r *Redis) GetActiveOperation(ctx context.Context, sandboxID string) (*ActiveOperation, bool) {
+	if r == nil || r.client == nil {
+		return nil, false
+	}
+	data, err := r.client.Get(ctx, activeOperationKey(sandboxID)).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	var op ActiveOperation
+	if err := json.Unmarshal(data, &op); err != nil {
+		_ = r.client.Del(ctx, activeOperationKey(sandboxID))
+		return nil, false
+	}
+	// Verify bounded duration
+	if time.Since(op.StartedAt) > time.Duration(op.MaxDurationSeconds)*time.Second {
+		_ = r.client.Del(ctx, activeOperationKey(sandboxID))
+		return nil, false
+	}
+	return &op, true
+}
+
+// EndOperation completes the active operation.
+func (r *Redis) EndOperation(ctx context.Context, sandboxID string) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	return r.client.Del(ctx, activeOperationKey(sandboxID)).Err()
+}
+
+// SetHibernationWarning flags a sandbox approaching hibernation.
+func (r *Redis) SetHibernationWarning(ctx context.Context, sandboxID string, ttl time.Duration) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	return r.client.Set(ctx, hibernationWarningKey(sandboxID), time.Now().Unix(), ttl).Err()
+}
+
+// HasHibernationWarning checks if the warning flag is set.
+func (r *Redis) HasHibernationWarning(ctx context.Context, sandboxID string) bool {
+	if r == nil || r.client == nil {
+		return false
+	}
+	n, err := r.client.Exists(ctx, hibernationWarningKey(sandboxID)).Result()
+	return err == nil && n > 0
+}
+
+// SetGracePeriod starts the grace period countdown before hibernation.
+func (r *Redis) SetGracePeriod(ctx context.Context, sandboxID string, duration time.Duration) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	return r.client.Set(ctx, hibernationGraceKey(sandboxID), time.Now().Unix(), duration).Err()
+}
+
+// InGracePeriod checks if grace period is active.
+func (r *Redis) InGracePeriod(ctx context.Context, sandboxID string) bool {
+	if r == nil || r.client == nil {
+		return false
+	}
+	n, err := r.client.Exists(ctx, hibernationGraceKey(sandboxID)).Result()
+	return err == nil && n > 0
+}
+
+// ClearHibernationState cleans up warning and grace keys.
+func (r *Redis) ClearHibernationState(ctx context.Context, sandboxID string) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	return r.client.Del(ctx, hibernationWarningKey(sandboxID), hibernationGraceKey(sandboxID)).Err()
 }
 
 // ClearLatestStat removes the sandbox's latest sample from Redis during teardown.

@@ -18,6 +18,7 @@ import {
   Server,
   ExternalLink,
   Copy,
+  RefreshCw,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { motion } from "framer-motion";
@@ -108,6 +109,7 @@ export default function SandboxesDashboard() {
     data: dataRaw,
     error,
     isLoading,
+    mutate,
   } = useSWR<any>("/api/environments", fetcher, {
     refreshInterval: 3000,
   });
@@ -261,11 +263,21 @@ export default function SandboxesDashboard() {
             ))}
           </div>
         ) : error ? (
-          <div className="bg-red-500/10 border border-red-500/20 p-12 rounded-[32px] text-center">
-            <XCircle className="w-8 h-8 text-red-500 dark:text-red-400 mx-auto mb-3" />
-            <p className="text-red-500 dark:text-red-400 font-semibold text-sm">
+          <div className="bg-red-500/10 border border-red-500/20 p-10 rounded-[32px] text-center max-w-xl mx-auto my-6">
+            <XCircle className="w-10 h-10 text-red-500 dark:text-red-400 mx-auto mb-3" />
+            <h3 className="text-red-500 dark:text-red-400 font-bold text-base mb-1">
               Failed to load sandboxes
+            </h3>
+            <p className="text-xs text-on-surface-variant mb-4 leading-relaxed">
+              Unable to reach the backend API server. If running in local development or Docker, ensure the backend container and Traefik gateway are running.
             </p>
+            <button
+              onClick={() => mutate()}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 text-xs font-semibold transition-all cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Connection</span>
+            </button>
           </div>
         ) : filteredEnvs.length === 0 ? (
           <div className="bg-surface-container-lowest border border-outline-variant rounded-[32px] py-20 px-6 text-center flex flex-col items-center">

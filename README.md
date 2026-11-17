@@ -141,6 +141,8 @@ Explore our comprehensive technical documentation:
 - 🎨 **[frontend/README.md](frontend/README.md)** — Next.js 16 Web IDE, ash grey terminals, workspace projects, and theme tokens.
 - 🛠️ **[docs/SETUP.md](docs/SETUP.md)** — Step-by-step development setup, port mapping (`:5434`, `:6380`, `:1234`), and debugging guide.
 - 🏛️ **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System architecture, gateway proxy, wake-on-request, and container lifecycles.
+- ⚡ **[docs/LIFECYCLE.md](docs/LIFECYCLE.md)** — Advanced lifecycle state machine, multi-user activity, grace periods, and data retention.
+- 👥 **[docs/COLLABORATION.md](docs/COLLABORATION.md)** — Project collaboration, RBAC matrix, and Default Personal Space vs Shareable Projects.
 - 📡 **[docs/API.md](docs/API.md)** — Complete API specifications for Sandboxes, Workspace Projects, and WebSockets.
 - 🗄️ **[docs/DATABASE.md](docs/DATABASE.md)** — PostgreSQL schema models, GORM definitions, and retention rules.
 - 🔒 **[docs/SECURITY.md](docs/SECURITY.md)** — Threat model, capability dropping, AES-256 token encryption, and gVisor sandboxing.

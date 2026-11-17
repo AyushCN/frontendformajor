@@ -62,13 +62,16 @@ func (r *ExpiryReaper) tick(ctx context.Context) {
 				continue
 			}
 		}
-		// Remove the on-disk working copy too: destruction is meant to be
-		// total. Validated: an empty subdomain would otherwise resolve to
-		// the work ROOT and delete every sandbox's files, and a subdomain
-		// with separators/.. could escape the root entirely.
-		if err := orchestrator.RemoveSandboxWorkDir(r.cfg.SandboxWorkDir, sb.Subdomain); err != nil {
-			r.logger.Warn("expiry-reaper: removing work dir",
-				slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+		// Data Preservation: Separate runtime lifecycle from workspace data retention.
+		// Runtime teardown terminates the active containers, volumes, and networking.
+		// The on-disk workspace data is preserved for a retention period (7 days) post-expiration,
+		// allowing project members to restore to a new sandbox instance or export changes.
+		retentionPeriod := 7 * 24 * time.Hour
+		if sb.DestroyedAt != nil && time.Since(*sb.DestroyedAt) > retentionPeriod {
+			if err := orchestrator.RemoveSandboxWorkDir(r.cfg.SandboxWorkDir, sb.Subdomain); err != nil {
+				r.logger.Warn("expiry-reaper: removing retention-expired work dir",
+					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+			}
 		}
 
 		now := time.Now()

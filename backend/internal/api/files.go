@@ -216,7 +216,7 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.touchSandbox(r.Context(), sb)
+	s.touchSandbox(r.Context(), sb, user.ID)
 	if sb.DestroyedAt != nil || sb.Status == db.StatusDeleted || sb.Status == db.StatusExpired {
 		writeErr(w, http.StatusConflict, "sandbox is destroyed; nothing to edit")
 		return

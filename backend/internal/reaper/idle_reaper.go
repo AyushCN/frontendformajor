@@ -60,13 +60,53 @@ func (r *IdleReaper) tick(ctx context.Context) {
 		if sb.Status != db.StatusRunning || sb.ContainerID == "" {
 			continue
 		}
-		if !r.cache.IsIdle(ctx, sb.ID) {
+
+		// 1. Active Operation Protection: Temporary bounded tasks (builds, git ops,
+		// migrations) temporarily protect from hibernation.
+		if op, ok := r.cache.GetActiveOperation(ctx, sb.ID); ok {
+			r.logger.Debug("idle-reaper: active operation in progress, deferring hibernation",
+				slog.String("sandbox", sb.ID),
+				slog.String("op_type", op.Type),
+				slog.String("user_id", op.UserID))
 			continue
 		}
-		// No request touched this sandbox's marker for >= idle_timeout_seconds:
-		// stop the container, keep every byte of data, mark it hibernated.
+
+		// 2. Multi-user Activity Tracking: If ANY authorized user is actively working,
+		// do not hibernate.
+		if r.cache.HasActiveUserActivity(ctx, sb.ID) {
+			continue
+		}
+
+		// 3. Hibernation Warning & Grace Period:
+		idleTTL := r.cache.GetIdleTTL(ctx, sb.ID)
+		if idleTTL > 0 {
+			// Approaching hibernation warning window (within 2 minutes)
+			if idleTTL <= 2*time.Minute {
+				_ = r.cache.SetHibernationWarning(ctx, sb.ID, 2*time.Minute)
+			}
+			continue
+		}
+
+		// Idle TTL has lapsed: enter or evaluate grace period
+		if !r.cache.InGracePeriod(ctx, sb.ID) {
+			graceDur := 60 * time.Second
+			// Ensure grace period cannot bypass maximum sandbox lifetime or expiration
+			if !sb.ExpiresAt.IsZero() && time.Now().Add(graceDur).After(sb.ExpiresAt) {
+				graceDur = time.Until(sb.ExpiresAt)
+				if graceDur <= 0 {
+					continue // ExpiryReaper will permanently destroy it
+				}
+			}
+			_ = r.cache.SetGracePeriod(ctx, sb.ID, graceDur)
+			r.logger.Info("idle-reaper: sandbox entered hibernation grace period",
+				slog.String("sandbox", sb.ID),
+				slog.Duration("grace_duration", graceDur))
+			continue
+		}
+
+		// Grace period has elapsed with no activity reset: proceed to hibernate.
 		if err := r.orch.StopContainer(ctx, sb.ContainerID); err != nil {
-			r.logger.Warn("idle-reaper: stopping container", slog.String("sandbox", sb.ID))
+			r.logger.Warn("idle-reaper: stopping container", slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
 			continue
 		}
 		if err := r.cache.Clear(ctx, sb.ID); err != nil {

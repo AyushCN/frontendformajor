@@ -214,6 +214,8 @@ func (s *Server) Router() http.Handler {
 	// Public auth endpoints.
 	r.Get("/api/auth/github", s.handleAuthStart)
 	r.Get("/api/auth/github/callback", s.handleAuthCallback)
+	r.Post("/api/auth/dev-login", s.handleDevLogin)
+	r.Get("/api/auth/dev-login", s.handleDevLogin)
 
 	// Logout is deliberately not behind requireUser. Its whole job is to clear
 	// the session cookie, so requiring a valid session to reach it means a
@@ -240,6 +242,11 @@ func (s *Server) Router() http.Handler {
 			pr.Post("/{id}/branch", s.handleUpdateBranch)
 			pr.Get("/{id}/warnings", s.handleSandboxWarnings)
 			pr.Get("/{id}/stats/history", s.handleStatsHistory)
+			pr.Post("/{id}/activity", s.handleReportActivity)
+			pr.Get("/{id}/lifecycle/status", s.handleLifecycleStatus)
+			pr.Post("/{id}/operations/start", s.handleStartOperation)
+			pr.Post("/{id}/operations/end", s.handleEndOperation)
+			pr.Post("/{id}/restore", s.handleRestoreExpiredSandbox)
 
 			// Phase F/G: in-browser editor + git push.
 			pr.Get("/{id}/files", s.handleFileTree)

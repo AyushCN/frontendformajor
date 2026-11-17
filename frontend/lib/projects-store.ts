@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 
 const PROJECTS_FILE = "/tmp/api-sandbox-links/projects.json";
+const INVITATIONS_FILE = "/tmp/api-sandbox-links/invitations.json";
 
 export interface ProjectRepository {
   id: string;
@@ -15,16 +16,35 @@ export interface StoredProject {
   name: string;
   description: string;
   createdAt: string;
+  isDefault?: boolean;
+  createdBy?: string;
   collaborators: any[];
   sandboxIds: string[];
   repositories?: ProjectRepository[];
 }
 
+export interface StoredInvitation {
+  id: string;
+  projectId: string;
+  projectName: string;
+  inviterId: string;
+  inviterName: string;
+  inviteeId: string;
+  inviteeIdentifier: string;
+  role: "EDITOR" | "VIEWER";
+  status: "PENDING" | "ACCEPTED" | "REJECTED" | "REVOKED" | "EXPIRED";
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt?: string;
+}
+
 const DEFAULT_PROJECT: StoredProject = {
   id: "default-project",
-  name: "Default Project",
-  description: "Default workspace for sandboxes",
+  name: "Default Project (Personal)",
+  description: "Personal private development environment",
   createdAt: "2026-01-01T00:00:00Z",
+  isDefault: true,
+  createdBy: "ayushcn@gmail.com",
   collaborators: [
     {
       id: "collab-owner",
@@ -34,7 +54,7 @@ const DEFAULT_PROJECT: StoredProject = {
       acceptedAt: "2026-01-01T00:00:00Z",
       user: {
         username: "AyushCN",
-        email: "ayush@api-sandbox.local",
+        email: "ayushcn@gmail.com",
       },
     },
   ],
@@ -54,30 +74,44 @@ export function getProjects(): StoredProject[] {
     if (!Array.isArray(list) || list.length === 0) {
       return [DEFAULT_PROJECT];
     }
-    // Ensure default-project exists in the list
-    if (!list.some((p: StoredProject) => p.id === "default-project")) {
-      list.unshift(DEFAULT_PROJECT);
-    }
-
-    // Auto-migrate any legacy "devuser" references to logged-in user "AyushCN"
+    // Ensure default-project exists in the list and isDefault is true
     let mutated = false;
+    let foundDefault = false;
     for (const p of list) {
-      if (Array.isArray(p.collaborators)) {
-        for (const c of p.collaborators) {
-          if (c.user?.username === "devuser" || c.user?.email === "dev@api-sandbox.local") {
-            c.user.username = "AyushCN";
-            c.user.email = "ayush@api-sandbox.local";
+      if (p.id === "default-project") {
+        p.isDefault = true;
+        foundDefault = true;
+        // Default Project (Personal Space) must be owned by the user, not Admin
+        if (Array.isArray(p.collaborators) && p.collaborators.length > 0) {
+          const ownerCollab = p.collaborators[0];
+          if (ownerCollab.user?.username === "Admin" || ownerCollab.userId === "user-admin") {
+            ownerCollab.userId = "user-ayushcn";
+            ownerCollab.user = {
+              username: "AyushCN",
+              email: "ayushcn@gmail.com",
+            };
+            p.createdBy = "ayushcn@gmail.com";
             mutated = true;
           }
         }
       }
-      if (!Array.isArray(p.sandboxIds)) {
-        p.sandboxIds = [];
-        mutated = true;
-      }
-      if (!Array.isArray(p.repositories)) {
-        p.repositories = [];
-        mutated = true;
+    }
+    if (!foundDefault) {
+      list.unshift(DEFAULT_PROJECT);
+    }
+
+    // Auto-migrate legacy user emails if needed
+    for (const p of list) {
+      if (Array.isArray(p.collaborators)) {
+        for (const c of p.collaborators) {
+          const uname = (c.user?.username || "").toLowerCase();
+          if (uname === "ayushcn" || uname === "ayush") {
+            if (c.user.email !== "ayushcn@gmail.com") {
+              c.user.email = "ayushcn@gmail.com";
+              mutated = true;
+            }
+          }
+        }
       }
     }
     if (mutated) {
@@ -95,28 +129,17 @@ export function saveProjects(projects: StoredProject[]): void {
     fs.mkdirSync(path.dirname(PROJECTS_FILE), { recursive: true });
     fs.writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2));
   } catch (err) {
-    console.error("Failed to save projects:", err);
+    console.error("Failed to save projects to disk:", err);
   }
 }
 
-export function getProjectById(id: string): StoredProject | undefined {
+export function getProjectById(id: string): StoredProject | null {
   const list = getProjects();
-  let proj = list.find((p) => p.id === id);
-  if (!proj && id === "default-project") return DEFAULT_PROJECT;
-  if (!proj) {
-    // If not found in list, synthesize a clean fallback project
-    const name = id.replace(/^proj-/, "").replace(/-/g, " ");
-    return {
-      id,
-      name: name.charAt(0).toUpperCase() + name.slice(1),
-      description: "Active engineering workspace",
-      createdAt: new Date().toISOString(),
-      collaborators: DEFAULT_PROJECT.collaborators,
-      sandboxIds: [],
-      repositories: [],
-    };
+  const proj = list.find((p) => p.id === id);
+  if (!proj && id === "default-project") {
+    return DEFAULT_PROJECT;
   }
-  return proj;
+  return proj || null;
 }
 
 export function addProject(
@@ -128,8 +151,14 @@ export function addProject(
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const id = `proj-${slug || Date.now()}`;
 
-  const username = creator?.username || "AyushCN";
-  const email = creator?.email || `${username.toLowerCase()}@api-sandbox.local`;
+  const username = creator?.username || "Admin";
+  const unameLower = username.toLowerCase();
+  const defaultEmail = (unameLower === "ayushcn" || unameLower === "ayush")
+    ? "ayushcn@gmail.com"
+    : unameLower === "admin"
+    ? "admin@api-sandbox.local"
+    : `${unameLower}@users.api-sandbox.local`;
+  const email = creator?.email || defaultEmail;
   const userId = creator?.userId || `user-${username.toLowerCase()}`;
 
   const ownerCollab = {
@@ -149,6 +178,8 @@ export function addProject(
     name: name.trim(),
     description: description.trim(),
     createdAt: new Date().toISOString(),
+    isDefault: false,
+    createdBy: email,
     collaborators: [ownerCollab],
     sandboxIds: [],
     repositories: [],
@@ -170,40 +201,255 @@ export function associateSandboxWithProject(projectId: string, sandboxId: string
   }
 }
 
-export function inviteCollaborator(projectId: string, identifier: string, role = "EDITOR"): any {
-  const list = getProjects();
-  let proj = list.find((p) => p.id === projectId);
-  if (!proj) {
-    proj = getProjectById(projectId);
-    if (proj) list.push(proj);
-  }
-  if (!proj) return null;
-  if (!proj.collaborators) proj.collaborators = [];
+// ---- Invitations Storage ----
 
-  const isEmail = identifier.includes("@");
-  const username = isEmail ? identifier.split("@")[0] : identifier;
-  const email = isEmail ? identifier : `${identifier}@api-sandbox.local`;
-  const collab = {
-    id: `collab-${Date.now()}`,
-    userId: `user-${Date.now()}`,
-    role: role.toUpperCase(),
-    status: "ACTIVE",
-    acceptedAt: new Date().toISOString(),
-    user: {
-      username,
-      email,
-    },
+export function getInvitations(): StoredInvitation[] {
+  try {
+    if (!fs.existsSync(INVITATIONS_FILE)) {
+      return [];
+    }
+    const raw = fs.readFileSync(INVITATIONS_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+export function saveInvitations(invites: StoredInvitation[]): void {
+  try {
+    fs.mkdirSync(path.dirname(INVITATIONS_FILE), { recursive: true });
+    fs.writeFileSync(INVITATIONS_FILE, JSON.stringify(invites, null, 2));
+  } catch (err) {
+    console.error("Failed to save invitations to disk:", err);
+  }
+}
+
+export function createProjectInvitation(
+  projectId: string,
+  identifier: string,
+  role: string = "EDITOR",
+  inviter?: { userId?: string; username?: string; email?: string }
+): StoredInvitation {
+  const proj = getProjectById(projectId);
+  if (!proj) {
+    throw new Error("Project not found");
+  }
+
+  // Enforce Default Project privacy: CANNOT be shared
+  if (proj.isDefault || proj.id === "default-project") {
+    throw new Error("Default Project (Personal Space) cannot be shared or receive invitations");
+  }
+
+  const trimmed = identifier.trim().toLowerCase();
+  const inviterEmail = (inviter?.email || "").toLowerCase();
+  const inviterUsername = (inviter?.username || "").toLowerCase();
+
+  // Edge case 1: Self invite
+  if (trimmed === inviterEmail || trimmed === inviterUsername) {
+    throw new Error("Cannot invite yourself to your own project");
+  }
+
+  // Edge case 2: Already a member
+  if (Array.isArray(proj.collaborators)) {
+    const isMember = proj.collaborators.some(
+      (c) => c.status === "ACTIVE" && (
+        c.user?.email?.toLowerCase() === trimmed ||
+        c.user?.username?.toLowerCase() === trimmed
+      )
+    );
+    if (isMember) {
+      throw new Error("User is already a member of this project");
+    }
+  }
+
+  // Edge case 3: Duplicate pending invitation
+  const invites = getInvitations();
+  const now = new Date();
+  const duplicate = invites.find(
+    (i) => i.projectId === projectId &&
+      i.status === "PENDING" &&
+      new Date(i.expiresAt) > now &&
+      i.inviteeIdentifier.toLowerCase() === trimmed
+  );
+  if (duplicate) {
+    throw new Error("An invitation is already pending for this user");
+  }
+
+  const validRole = role === "VIEWER" ? "VIEWER" : "EDITOR";
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const newInvite: StoredInvitation = {
+    id: `invite-${Date.now()}`,
+    projectId: proj.id,
+    projectName: proj.name,
+    inviterId: inviter?.userId || "user-owner",
+    inviterName: inviter?.username || "Project Owner",
+    inviteeId: `user-${trimmed.replace(/[^a-z0-9]/g, "")}`,
+    inviteeIdentifier: trimmed,
+    role: validRole,
+    status: "PENDING",
+    createdAt: new Date().toISOString(),
+    expiresAt,
   };
-  proj.collaborators.push(collab);
-  saveProjects(list);
-  return collab;
+
+  invites.push(newInvite);
+  saveInvitations(invites);
+  return newInvite;
+}
+
+export function getUserInvitations(userIdentifier?: string): StoredInvitation[] {
+  const invites = getInvitations();
+  const now = new Date();
+  const idStr = (userIdentifier || "").toLowerCase();
+
+  return invites.filter((i) => {
+    if (i.status !== "PENDING") return false;
+    if (new Date(i.expiresAt) <= now) {
+      i.status = "EXPIRED";
+      return false;
+    }
+    if (!idStr) return true; // return all pending if no user filter specified
+    return i.inviteeIdentifier.toLowerCase() === idStr ||
+      idStr.includes(i.inviteeIdentifier.toLowerCase()) ||
+      i.inviteeIdentifier.toLowerCase().includes(idStr);
+  });
+}
+
+export function acceptProjectInvitation(
+  invitationId: string,
+  user?: { userId?: string; username?: string; email?: string }
+): StoredProject {
+  const invites = getInvitations();
+  const invite = invites.find((i) => i.id === invitationId);
+  if (!invite) {
+    throw new Error("Invitation not found");
+  }
+
+  if (invite.status === "REVOKED") {
+    throw new Error("Invitation was revoked by the project owner");
+  }
+  if (invite.status === "REJECTED") {
+    throw new Error("Invitation was previously rejected");
+  }
+  if (invite.status === "EXPIRED" || new Date(invite.expiresAt) <= new Date()) {
+    invite.status = "EXPIRED";
+    saveInvitations(invites);
+    throw new Error("Invitation has expired");
+  }
+
+  const proj = getProjectById(invite.projectId);
+  if (!proj) {
+    throw new Error("Project not found");
+  }
+
+  // Update invitation status
+  invite.status = "ACCEPTED";
+  invite.acceptedAt = new Date().toISOString();
+  saveInvitations(invites);
+
+  // Add user to project collaborators with assigned role
+  if (!proj.collaborators) proj.collaborators = [];
+  const username = user?.username || invite.inviteeIdentifier.split("@")[0] || "Collaborator";
+  const unameLower = username.toLowerCase();
+  const defaultInviteEmail = (unameLower === "ayushcn" || unameLower === "ayush")
+    ? "ayushcn@gmail.com"
+    : unameLower === "admin"
+    ? "admin@api-sandbox.local"
+    : `${unameLower}@users.api-sandbox.local`;
+  const email = user?.email || (invite.inviteeIdentifier.includes("@") ? invite.inviteeIdentifier : defaultInviteEmail);
+  const userId = user?.userId || `user-${username.toLowerCase()}`;
+
+  const existingCollab = proj.collaborators.find((c) => c.userId === userId || c.user?.email === email);
+  if (existingCollab) {
+    existingCollab.role = invite.role;
+    existingCollab.status = "ACTIVE";
+    existingCollab.acceptedAt = new Date().toISOString();
+  } else {
+    proj.collaborators.push({
+      id: `collab-${Date.now()}`,
+      userId,
+      role: invite.role,
+      status: "ACTIVE",
+      acceptedAt: new Date().toISOString(),
+      user: {
+        username,
+        email,
+      },
+    });
+  }
+
+  const list = getProjects();
+  const idx = list.findIndex((p) => p.id === proj.id);
+  if (idx !== -1) {
+    list[idx] = proj;
+    saveProjects(list);
+  }
+
+  return proj;
+}
+
+export function rejectProjectInvitation(invitationId: string): boolean {
+  const invites = getInvitations();
+  const invite = invites.find((i) => i.id === invitationId);
+  if (!invite) return false;
+
+  invite.status = "REJECTED";
+  saveInvitations(invites);
+  return true;
+}
+
+export function revokeProjectInvitation(projectId: string, invitationId: string): boolean {
+  const invites = getInvitations();
+  const invite = invites.find((i) => i.id === invitationId && i.projectId === projectId);
+  if (!invite) return false;
+
+  if (invite.status === "ACCEPTED") {
+    throw new Error("Cannot revoke an already accepted invitation. Remove member instead.");
+  }
+
+  invite.status = "REVOKED";
+  saveInvitations(invites);
+  return true;
+}
+
+export function inviteCollaborator(projectId: string, identifier: string, role = "EDITOR"): any {
+  // Backwards compatible wrapper calling createProjectInvitation
+  return createProjectInvitation(projectId, identifier, role);
 }
 
 export function removeCollaborator(projectId: string, userId: string): boolean {
   const list = getProjects();
   const proj = list.find((p) => p.id === projectId);
   if (!proj || !proj.collaborators) return false;
+
+  // Cannot remove owner from Default Project or remove the owner of any project
+  const member = proj.collaborators.find((c: any) => c.userId === userId || c.id === userId);
+  if (member && member.role === "OWNER") {
+    throw new Error("Project owner cannot be removed");
+  }
+
   proj.collaborators = proj.collaborators.filter((c: any) => c.userId !== userId && c.id !== userId);
+  saveProjects(list);
+  return true;
+}
+
+export function updateCollaboratorRole(projectId: string, userId: string, newRole: string): boolean {
+  const list = getProjects();
+  const proj = list.find((p) => p.id === projectId);
+  if (!proj || !proj.collaborators) return false;
+
+  if (proj.isDefault || proj.id === "default-project") {
+    throw new Error("Default Project (Personal Space) roles cannot be modified");
+  }
+
+  const member = proj.collaborators.find((c: any) => c.userId === userId || c.id === userId);
+  if (!member) return false;
+
+  if (member.role === "OWNER") {
+    throw new Error("Project owner role cannot be changed. Transfer ownership instead.");
+  }
+
+  member.role = newRole === "VIEWER" ? "VIEWER" : "EDITOR";
   saveProjects(list);
   return true;
 }
@@ -214,17 +460,14 @@ export function addProjectRepository(
 ): ProjectRepository | null {
   const list = getProjects();
   let proj = list.find((p) => p.id === projectId);
-  if (!proj) {
-    proj = getProjectById(projectId);
-    if (proj) list.push(proj);
-  }
   if (!proj) return null;
   if (!proj.repositories) proj.repositories = [];
+
   const newRepo: ProjectRepository = {
     id: `repo-${Date.now()}`,
     name: repo.name.trim(),
     gitUrl: repo.gitUrl.trim(),
-    defaultBranch: repo.defaultBranch?.trim() || "main",
+    defaultBranch: repo.defaultBranch || "main",
   };
   proj.repositories.push(newRepo);
   saveProjects(list);
@@ -257,3 +500,4 @@ export function filterSandboxesForProject(projectId: string, allSandboxes: any[]
   const set = new Set(proj.sandboxIds);
   return allSandboxes.filter((sb) => set.has(sb.id));
 }
+

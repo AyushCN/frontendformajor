@@ -332,6 +332,29 @@ func (s *Store) OwnsSandbox(sandboxID, userID string) (bool, error) {
 	return count > 0, nil
 }
 
+// CanAccessSandbox reports whether userID is authorized to access the sandbox
+// (either as repository owner or as an active project member).
+func (s *Store) CanAccessSandbox(sandboxID, userID string) (bool, error) {
+	if sandboxID == "" || userID == "" {
+		return false, nil
+	}
+	owns, err := s.OwnsSandbox(sandboxID, userID)
+	if err == nil && owns {
+		return true, nil
+	}
+	// Check project_members if table exists
+	if s.db.Migrator().HasTable("project_members") {
+		var memberCount int64
+		_ = s.db.Table("project_members").
+			Where("sandbox_id = ? AND user_id = ? AND role != 'REVOKED'", sandboxID, userID).
+			Count(&memberCount).Error
+		if memberCount > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ---- deployments --------------------------------------------------------
 
 // CreateDeployment records a build attempt in the history table and returns

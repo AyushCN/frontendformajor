@@ -20,6 +20,7 @@ type Store interface {
 	ListSandboxes(userID string) ([]*db.Sandbox, error)
 	FindOrCreateRepository(userID, cloneURL, defaultBranch string) (*db.Repository, error)
 	GetRepository(id string) (*db.Repository, error)
+	CreateSandbox(sb *db.Sandbox) error
 	CreateSandboxWithinLimits(sb *db.Sandbox, userID string, maxActive, maxRunning int) error
 	UpsertEnvVar(sandboxID, key string, value []byte, aiSuggested bool) error
 	RecordFileEdit(sandboxID, relPath, userID string) error

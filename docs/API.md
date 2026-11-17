@@ -58,6 +58,11 @@ Returned by all sandbox endpoints (`sandboxJSON`):
 | `GET` | `/api/sandboxes/` | List all sandboxes for the authenticated user |
 | `POST`| `/api/sandboxes/` | Create & queue a new sandbox deployment (Body below) |
 | `GET` | `/api/sandboxes/{id}` | Retrieve sandbox status and metadata |
+| `GET` | `/api/sandboxes/{id}/lifecycle/status` | Real-time idle TTL, warning flag, grace period, active operation, and retention deadline |
+| `POST`| `/api/sandboxes/{id}/activity` | Authenticated presence touch; resets idle timer and clears warning/grace flags |
+| `POST`| `/api/sandboxes/{id}/operations/start` | Register bounded operation (`BUILD`, `DEPENDENCY_INSTALL`, `GIT_PULL`, `GIT_COMMIT`, `UPLOAD`, `MIGRATION`) to defer hibernation |
+| `POST`| `/api/sandboxes/{id}/operations/end` | Terminate active operation protection |
+| `POST`| `/api/sandboxes/{id}/restore` | Create a new sandbox instance from preserved workspace files without reviving expired runtime |
 | `POST`| `/api/sandboxes/{id}/actions/extend` | Extend sandbox lifetime (`additional_seconds`) |
 | `POST`| `/api/sandboxes/{id}/actions/destroy`| Permanently destroy sandbox and tear down sidecars |
 | `POST`| `/api/sandboxes/{id}/fork` | Clone sandbox working tree into a new sibling sandbox |
@@ -159,6 +164,13 @@ Workspace projects provide team-based organization, repository grouping, and env
 | `GET` | `/api/projects/{id}/workspaces` | List sandboxes scoped exclusively to this project |
 | `POST`| `/api/projects/{id}/link` | Link an existing sandbox ID to this project |
 | `GET` | `/api/projects/{id}/change-requests` | List change requests in this project |
+| `GET` | `/api/invitations` | List pending collaboration invitations for authenticated user |
+| `POST`| `/api/invitations/{id}/accept` | Accept an invitation to join a shared project |
+| `POST`| `/api/invitations/{id}/reject` | Decline an invitation to join a shared project |
+
+### Spaces Policy & Constraints
+- **Default Project (Personal Space)**: ID `default-project`. Automatically created for each user, owned exclusively by that user. Private to that user; cannot be shared or invited to (`403 Forbidden` if invite is attempted). Sharing controls do not appear.
+- **Shareable Projects**: Explicitly created for collaboration. Supports role-based access control (`OWNER`, `EDITOR`, `VIEWER`), invitations, member role updates, and shared container access.
 
 ---
 

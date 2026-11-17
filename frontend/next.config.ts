@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
     '192.168.132.215',
     'localhost',
     '127.0.0.1',
+    '*.trycloudflare.com',
+    '*.ngrok-free.app',
+    '*.loca.lt',
   ],
   async rewrites() {
     const backend = process.env.BACKEND_URL || 'http://localhost:8080';

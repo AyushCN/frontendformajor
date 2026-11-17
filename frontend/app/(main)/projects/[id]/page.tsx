@@ -20,6 +20,8 @@ import {
   CheckCircle2,
   CircleDot,
   Plus,
+  Lock,
+  Share2,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { fetchWithAuth } from "@/lib/auth";
@@ -204,7 +206,9 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
 
   const openCRs = Array.isArray(changeRequests) ? changeRequests.filter((cr: ChangeRequest) => cr.status === "OPEN").length : 0;
 
-  const tabs: { id: Tab; label: string; icon: React.ElementType; count?: number }[] = [
+  const isDefaultProject = id === "default-project" || (project as any)?.isDefault === true;
+
+  const allTabs: { id: Tab; label: string; icon: React.ElementType; count?: number }[] = [
     { id: "overview",        label: "Overview",        icon: Folder    },
     { id: "repositories",    label: "Repositories",    icon: Database,  count: Array.isArray(repositories) ? repositories.length : undefined },
     { id: "members",         label: "Members",         icon: Users,     count: Array.isArray(members) ? members.length : undefined },
@@ -212,6 +216,8 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
     { id: "environments",    label: "Environments",    icon: Play,      count: Array.isArray(environments) ? environments.length : undefined },
     { id: "change-requests", label: "Change Requests", icon: GitMerge,  count: openCRs || undefined },
   ];
+
+  const tabs = isDefaultProject ? allTabs.filter(t => t.id !== "members") : allTabs;
 
   return (
     <div className="flex flex-col gap-6 pb-12">
@@ -225,7 +231,18 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
             <Folder className="w-6 h-6 text-primary-fixed" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold tracking-tight text-on-surface truncate">{project.name}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold tracking-tight text-on-surface truncate">{project.name}</h1>
+              {isDefaultProject ? (
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-mono text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> Personal Space
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-400 font-mono text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                  <Share2 className="w-3 h-3" /> Collaborative Space
+                </span>
+              )}
+            </div>
             {project.description && <p className="text-sm text-on-surface-variant truncate">{project.description}</p>}
           </div>
         </div>
@@ -247,6 +264,16 @@ export default function ProjectDetailsPage({ params }: { params: Promise<{ id: s
           </button>
         </div>
       </div>
+
+      {/* Default Project notice */}
+      {isDefaultProject && (
+        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4 flex items-center gap-3 text-xs text-on-surface">
+          <Lock className="w-4 h-4 text-emerald-400 shrink-0" />
+          <div>
+            <strong>Personal Default Space:</strong> All workspaces, environments, and containers in this project are strictly private to you. Collaboration and sharing controls are permanently disabled for personal spaces.
+          </div>
+        </div>
+      )}
 
       {/* Tab Navigation */}
       <div className="flex items-center gap-1 border-b border-outline-variant overflow-x-auto">

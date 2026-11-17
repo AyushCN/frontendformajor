@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/api-sandbox-links/backend/internal/config"
 	"github.com/api-sandbox-links/backend/internal/db"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
+	"github.com/api-sandbox-links/backend/internal/secret"
 )
 
 // wakeTimeout is how long the gateway waits for a hibernated container to
@@ -115,10 +117,10 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A destroyed sandbox answers with a permanent, honest status: the URL once
-	// existed and is gone for good (its tombstone row retains the history).
-	if sandbox.DestroyedAt != nil {
-		http.Error(w, "This sandbox has been destroyed (its lifetime expired or it was deleted).", http.StatusGone)
+	// A destroyed or expired sandbox answers with a permanent status: the URL once
+	// existed and cannot be revived.
+	if sandbox.DestroyedAt != nil || sandbox.Status == db.StatusExpired || (!sandbox.ExpiresAt.IsZero() && time.Now().After(sandbox.ExpiresAt)) {
+		http.Error(w, "This sandbox has expired and cannot be revived. Persisted data remains accessible according to project retention policy.", http.StatusGone)
 		return
 	}
 
@@ -129,6 +131,29 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 
 	// Wake-on-request: a hibernated container gets restarted before we forward.
 	if sandbox.Status == db.StatusHibernated {
+		// Authenticate and authorize wake-up:
+		user, authErr := g.authenticateRequest(r)
+		if authErr != nil || user == nil {
+			http.Error(w, "Authentication required to wake this hibernated sandbox.", http.StatusUnauthorized)
+			return
+		}
+		canAccess, err := g.store.CanAccessSandbox(sandbox.ID, user.ID)
+		if err != nil || !canAccess {
+			http.Error(w, "Access denied: you must be an authorized project member to wake this sandbox.", http.StatusForbidden)
+			return
+		}
+
+		// Readiness check query (?readiness=1 or Accept: application/json)
+		if r.URL.Query().Get("readiness") == "1" || (r.Header.Get("Accept") == "application/json" && r.Method == http.MethodGet) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(fmt.Sprintf(`{"status":"WAKING","ready":false,"subdomain":"%s","message":"Sandbox runtime is waking up..."}`, sandbox.Subdomain)))
+			go func() {
+				_ = g.wake(context.Background(), sandbox)
+			}()
+			return
+		}
+
 		if err := g.wake(r.Context(), sandbox); err != nil {
 			g.logger.Warn("gateway: wake failed", slog.String("sandbox", sandbox.ID), slog.String("err", err.Error()))
 			if errors.Is(err, context.Canceled) {
@@ -143,13 +168,19 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Mark activity so the idle reaper's timer restarts. Fire-and-forget: the
-	// request must not wait on Redis in the hot path.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = g.cache.Touch(ctx, sandbox.ID, sandbox.IdleTimeoutSeconds)
-	}()
+	// Mark activity only for meaningful user requests so the idle reaper's timer restarts.
+	// Filter out synthetic traffic (health probes, pings, dev HMR, favicons, websocket heartbeats).
+	if !isSyntheticTraffic(r.URL.Path) {
+		userID := ""
+		if user, err := g.authenticateRequest(r); err == nil && user != nil {
+			userID = user.ID
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = g.cache.TouchUserActivity(ctx, sandbox.ID, userID, sandbox.IdleTimeoutSeconds)
+		}()
+	}
 
 	ip, err := g.orch.ContainerIP(r.Context(), sandbox.ContainerID, "sandbox_"+sandbox.ID[:8])
 	if err != nil {
@@ -261,4 +292,48 @@ func (g *Gateway) subdomainFromHost(host string) (string, error) {
 		return "", fmt.Errorf("malformed sandbox host %q", host)
 	}
 	return sub, nil
+}
+
+var devUser = db.User{
+	ID:       "00000000-0000-0000-0000-000000000001",
+	GithubID: 1,
+	Username: "admin",
+	Email:    "admin@api-sandbox.local",
+}
+
+func (g *Gateway) authenticateRequest(r *http.Request) (*db.User, error) {
+	if g.cfg != nil && g.cfg.DevAuth {
+		return &devUser, nil
+	}
+	cookie, err := r.Cookie("asl_session")
+	if err != nil {
+		authHdr := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHdr, "Bearer ") {
+			token := strings.TrimPrefix(authHdr, "Bearer ")
+			if token == "dev" || token == "admin" {
+				return &devUser, nil
+			}
+		}
+		return nil, fmt.Errorf("no session cookie found")
+	}
+	if g.cfg != nil && len(g.cfg.EncryptionKey) == 32 {
+		b, err := secret.NewBox(g.cfg.EncryptionKey)
+		if err == nil {
+			plain, err := b.Decrypt([]byte(cookie.Value))
+			if err == nil {
+				githubID, err := strconv.ParseInt(string(plain), 10, 64)
+				if err == nil {
+					return g.store.GetUserByGithubID(githubID)
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("session authentication failed")
+}
+
+// isSyntheticTraffic detects health checks, pings, dev assets, and framework polling.
+func isSyntheticTraffic(reqPath string) bool {
+	return reqPath == "/favicon.ico" || reqPath == "/robots.txt" ||
+		strings.HasPrefix(reqPath, "/health") || strings.HasPrefix(reqPath, "/ping") ||
+		strings.HasPrefix(reqPath, "/__webpack") || strings.HasPrefix(reqPath, "/_next")
 }

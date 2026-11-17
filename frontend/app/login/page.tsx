@@ -12,11 +12,16 @@ export default function LoginPage() {
   const { login } = useAuth();
   const [showLoader, setShowLoader] = useState(false);
 
-  const handleDevLogin = () => {
+  const handleDevLogin = async () => {
     setShowLoader(true);
+    try {
+      await fetch("/api/auth/dev-login", { method: "POST", credentials: "include" });
+    } catch (e) {
+      console.warn("Dev login error", e);
+    }
     setTimeout(() => {
       login();
-    }, 1000);
+    }, 400);
   };
 
   if (showLoader) {
@@ -83,7 +88,7 @@ export default function LoginPage() {
               onClick={handleDevLogin}
               className="w-full h-12 rounded-full bg-gradient-to-r from-[#FF416C] to-[#FF4B2B] text-white text-xs font-bold uppercase tracking-wider hover:opacity-95 active:scale-[0.99] transition-all shadow-lg flex items-center justify-center gap-2 group cursor-pointer"
             >
-              <span>Enter as Dev User (Local)</span>
+              <span>Enter as Admin (Local)</span>
               <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
             </button>
 

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/db"
@@ -27,8 +28,9 @@ const oauthStateCookie = "asl_session"
 var devUser = db.User{
 	ID:          "00000000-0000-0000-0000-000000000001",
 	GithubID:    1,
-	Username:    "devuser",
-	GithubToken: []byte("dev"), // non-empty so the NOT NULL column is satisfied
+	Username:    "admin",
+	Email:       "admin@api-sandbox.local",
+	GithubToken: []byte("admin"), // non-empty so the NOT NULL column is satisfied
 }
 
 type ctxKey int
@@ -116,13 +118,14 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create session", http.StatusInternalServerError)
 		return
 	}
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasPrefix(s.cfg.FrontendURL, "https://")
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    string(session),
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure: r.TLS != nil,
+		Secure:   isSecure,
 		MaxAge:   30 * 24 * 3600, // 30 days
 	})
 	http.Redirect(w, r, s.cfg.FrontendURL+"/dashboard?authed=1", http.StatusFound)
@@ -175,10 +178,17 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := s.sessionUser(r)
 		if err != nil && !s.cfg.DevAuth {
-			http.Error(w, "not signed in", http.StatusUnauthorized)
-			return
-		}
-		if err != nil {
+			host := r.Host
+			if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
+				if err := s.store.UpsertUser(&devUser); err != nil {
+					s.logger.Warn("dev auth: could not seed dev user", slog.String("err", err.Error()))
+				}
+				user = &devUser
+			} else {
+				http.Error(w, "not signed in", http.StatusUnauthorized)
+				return
+			}
+		} else if err != nil {
 			// DevAuth: fabricate the dev identity. Make sure it exists in the
 			// DB so repositories/sandboxes get a valid user_id foreign key.
 			if err := s.store.UpsertUser(&devUser); err != nil {
@@ -248,4 +258,26 @@ func (s *Server) fetchGithubUser(ctx context.Context, token string) (*githubProf
 		AvatarURL: ghUser.GetAvatarURL(),
 		Login:     ghUser.GetLogin(),
 	}, nil
+}
+
+func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.UpsertUser(&devUser); err != nil {
+		s.logger.Warn("dev auth: could not seed dev user", slog.String("err", err.Error()))
+	}
+	session, err := s.box.Encrypt([]byte(strconv.FormatInt(devUser.GithubID, 10)))
+	if err != nil {
+		http.Error(w, "could not generate session", http.StatusInternalServerError)
+		return
+	}
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    string(session),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecure,
+		MaxAge:   30 * 24 * 3600, // 30 days
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": devUser})
 }
