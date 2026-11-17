@@ -138,7 +138,7 @@ func (s *Server) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 // handleRedeploy triggers a manual rebuild (used after edits are saved and by
 // the "redeploy" button). Runs in the background.
 func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
@@ -158,7 +158,7 @@ func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateBranch(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
@@ -573,7 +573,7 @@ func (s *Server) handleStartOperation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
@@ -606,7 +606,7 @@ func (s *Server) handleStartOperation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEndOperation(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}

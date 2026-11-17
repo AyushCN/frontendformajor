@@ -935,6 +935,16 @@ func (s *Store) DisassociateProjectSandbox(projectID, sandboxID string) error {
 	return s.db.Delete(&ProjectSandbox{}, "project_id = ? AND sandbox_id = ?", projectID, sandboxID).Error
 }
 
+// GetProjectIDForSandbox returns the project ID associated with a sandbox.
+func (s *Store) GetProjectIDForSandbox(sandboxID string) (string, error) {
+	var ps ProjectSandbox
+	err := s.db.Where("sandbox_id = ?", sandboxID).First(&ps).Error
+	if err != nil {
+		return "", err
+	}
+	return ps.ProjectID, nil
+}
+
 // ListProjectSandboxes returns all active sandboxes associated with a project.
 func (s *Store) ListProjectSandboxes(projectID string) ([]*Sandbox, error) {
 	var sandboxes []*Sandbox

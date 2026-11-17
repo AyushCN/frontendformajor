@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/api-sandbox-links/backend/internal/db"
 	"github.com/api-sandbox-links/backend/internal/git"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 )
@@ -228,6 +231,118 @@ func (s *Server) requireSandboxRole(w http.ResponseWriter, r *http.Request, minR
 // requireOwnedSandbox is the REST-shaped wrapper requiring OWNER role.
 func (s *Server) requireOwnedSandbox(w http.ResponseWriter, r *http.Request) (*db.Sandbox, bool) {
 	return s.requireSandboxRole(w, r, db.ProjectMemberRoleOwner)
+}
+
+// requireSandboxRoleForMutation enforces that the requester has EDITOR or OWNER permissions,
+// and enforces backend Copy-On-Write: if an EDITOR attempts to modify a sandbox they do not directly own,
+// the original sandbox is preserved unchanged, and a fork is automatically created and associated
+// with the editor before the modification proceeds.
+func (s *Server) requireSandboxRoleForMutation(w http.ResponseWriter, r *http.Request) (*db.Sandbox, bool) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return nil, false
+	}
+
+	id := chi.URLParam(r, "id")
+	// 1. Direct ownership: owner modifies their own sandbox directly
+	if owns, err := s.store.OwnsSandbox(id, user.ID); err == nil && owns {
+		sb, err := s.store.GetSandbox(id)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "sandbox not found")
+			return nil, false
+		}
+		return sb, true
+	}
+
+	// 2. Otherwise verify caller has at least EDITOR role in the project
+	role, err := s.store.GetSandboxRole(id, user.ID)
+	if err != nil || (role != db.ProjectMemberRoleOwner && role != db.ProjectMemberRoleEditor) {
+		writeErr(w, http.StatusForbidden, "forbidden: viewers cannot modify sandboxes")
+		return nil, false
+	}
+
+	// 3. The caller is an EDITOR modifying a shared sandbox they do not directly own.
+	// Backend-enforced Copy-On-Write (Non-negotiable requirement #7):
+	// The original sandbox MUST remain unchanged. A fork must be created and
+	// associated with the editor before modifications are allowed.
+	parent, err := s.store.GetSandbox(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "parent sandbox not found")
+		return nil, false
+	}
+
+	child, err := s.createCopyOnWriteFork(r.Context(), parent, user)
+	if err != nil {
+		s.logger.Warn("copy-on-write fork failed", slog.String("parent", parent.ID), slog.String("user", user.ID), slog.String("err", err.Error()))
+		writeErr(w, http.StatusInternalServerError, "could not provision copy-on-write sandbox fork: "+err.Error())
+		return nil, false
+	}
+
+	w.Header().Set("X-CoW-Forked-Sandbox-ID", child.ID)
+	w.Header().Set("X-CoW-Forked-Subdomain", child.Subdomain)
+	return child, true
+}
+
+func (s *Server) createCopyOnWriteFork(ctx context.Context, parent *db.Sandbox, user *db.User) (*db.Sandbox, error) {
+	subdomain := "cow-" + parent.Subdomain
+	var err error
+	if s.store != nil {
+		subdomain, err = s.uniqueSubdomain(subdomain)
+		if err != nil {
+			return nil, fmt.Errorf("allocating subdomain: %w", err)
+		}
+	}
+
+	remaining := time.Until(parent.ExpiresAt)
+	childLifetime := int64(remaining / time.Second)
+	if childLifetime < MinLifetimeSeconds {
+		childLifetime = MinLifetimeSeconds
+	}
+	if childLifetime > s.maxLifetime() {
+		childLifetime = s.maxLifetime()
+	}
+
+	now := time.Now().UTC()
+	child := &db.Sandbox{
+		ID:                 uuid.NewString(),
+		RepositoryID:       parent.RepositoryID,
+		ParentSandboxID:    &parent.ID,
+		BranchName:         parent.BranchName,
+		Subdomain:          subdomain,
+		Status:             db.StatusRunning,
+		IdleTimeoutSeconds: parent.IdleTimeoutSeconds,
+		LifetimeSeconds:    childLifetime,
+		ExpiresAt:          now.Add(time.Duration(childLifetime) * time.Second),
+		CreatedAt:          now,
+	}
+
+	if s.store != nil {
+		if err := s.store.CreateSandboxWithinLimits(child, user.ID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
+			return nil, fmt.Errorf("creating sandbox within limits: %w", err)
+		}
+		if projectID, pErr := s.store.GetProjectIDForSandbox(parent.ID); pErr == nil && projectID != "" {
+			_ = s.store.AssociateProjectSandbox(projectID, child.ID)
+		}
+		_ = s.store.RecordAuditEvent(&db.AuditEvent{
+			ID:        uuid.NewString(),
+			UserID:    &user.ID,
+			Action:    "SANDBOX_COW_FORK",
+			Resource:  fmt.Sprintf("parent:%s -> child:%s", parent.ID, child.ID),
+			CreatedAt: now,
+		})
+	}
+
+	// Deep-copy parent workspace directory to child workspace directory
+	if s.cfg != nil && s.cfg.SandboxWorkDir != "" {
+		parentDir := filepath.Join(s.cfg.SandboxWorkDir, parent.Subdomain)
+		childDir := filepath.Join(s.cfg.SandboxWorkDir, child.Subdomain)
+		if info, err := os.Stat(parentDir); err == nil && info.IsDir() {
+			_ = copyDir(parentDir, childDir)
+		}
+	}
+
+	return child, nil
 }
 
 // sandboxJSON renders a sandbox row plus computed fields the UI needs.

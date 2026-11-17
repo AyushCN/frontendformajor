@@ -45,6 +45,7 @@ type Store interface {
 	RemoveProjectRepository(projectID, repoID string) error
 	AssociateProjectSandbox(projectID, sandboxID string) error
 	DisassociateProjectSandbox(projectID, sandboxID string) error
+	GetProjectIDForSandbox(sandboxID string) (string, error)
 	ListProjectSandboxes(projectID string) ([]*db.Sandbox, error)
 	GetProjectRole(projectID, userID string) (db.ProjectMemberRole, error)
 	GetSandboxRole(sandboxID, userID string) (db.ProjectMemberRole, error)

@@ -213,7 +213,7 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
