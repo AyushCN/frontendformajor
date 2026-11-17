@@ -649,18 +649,14 @@ export default function EnvironmentDetail() {
   );
 
   const fallbackProject = useMemo(() => {
-    const defaultUsername = currentUser?.username || "Owner";
-    const defaultEmail =
-      currentUser?.email ||
-      (currentUser?.username
-        ? `${currentUser.username.toLowerCase()}@users.api-sandbox.local`
-        : "owner@api-sandbox.local");
-    const defaultUserId = currentUser?.id || `user-${defaultUsername.toLowerCase()}`;
+    const defaultUsername = currentUser?.username || "";
+    const defaultEmail = currentUser?.email || "";
+    const defaultUserId = currentUser?.id || "";
     return {
       id: env?.projectId || "default-project",
       name: "Default Workspace",
       isDefault: true,
-      collaborators: [
+      collaborators: defaultUserId ? [
         {
           id: "owner",
           userId: defaultUserId,
@@ -673,7 +669,7 @@ export default function EnvironmentDetail() {
             username: defaultUsername,
           },
         },
-      ],
+      ] : [],
     };
   }, [env?.projectId, currentUser]);
 

@@ -291,7 +291,7 @@ func (g *Gateway) subdomainFromHost(host string) (string, error) {
 		return "", fmt.Errorf("unrecognized sandbox host %q", host)
 	}
 	sub := strings.TrimSuffix(host, "."+g.cfg.SandboxBaseDomain)
-	if sub == "" || strings.ContainsAny(sub, " "){
+	if sub == "" || strings.ContainsAny(sub, " ") {
 		return "", fmt.Errorf("malformed sandbox host %q", host)
 	}
 	return sub, nil

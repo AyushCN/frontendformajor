@@ -16,7 +16,6 @@ import (
 	"github.com/api-sandbox-links/backend/internal/db"
 	"github.com/api-sandbox-links/backend/internal/git"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 )
@@ -205,42 +204,30 @@ var errSandboxForbidden = errors.New("sandbox not accessible")
 // point an HTTP status can no longer be sent; requireOwnedSandbox is the
 // writing wrapper used by the REST handlers.
 func (s *Server) authorizeSandboxAccess(r *http.Request) (*db.Sandbox, error) {
-	user, ok := s.userFrom(r)
-	if !ok {
-		return nil, errSandboxForbidden
-	}
-	id := chi.URLParam(r, "id")
-	owns, err := s.store.OwnsSandbox(id, user.ID)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("sandbox access check failed",
-				slog.String("sandbox", id), slog.String("err", err.Error()))
-		}
-		return nil, errSandboxForbidden
-	}
-	if !owns {
-		return nil, errSandboxForbidden
-	}
-	sb, err := s.store.GetSandbox(id)
-	if err != nil {
-		return nil, errSandboxForbidden
-	}
-	return sb, nil
+	return s.authorizeSandboxAccessWithRole(r, db.ProjectMemberRoleViewer)
 }
 
-// requireOwnedSandbox is the REST-shaped wrapper around
-// authorizeSandboxAccess: it writes the error response and reports ok=false.
-func (s *Server) requireOwnedSandbox(w http.ResponseWriter, r *http.Request) (*db.Sandbox, bool) {
+// requireSandboxRole verifies the requester has at least minRole for the sandbox.
+func (s *Server) requireSandboxRole(w http.ResponseWriter, r *http.Request, minRole db.ProjectMemberRole) (*db.Sandbox, bool) {
 	if _, ok := s.userFrom(r); !ok {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return nil, false
 	}
-	sb, err := s.authorizeSandboxAccess(r)
+	sb, err := s.authorizeSandboxAccessWithRole(r, minRole)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "sandbox not found")
+		if errors.Is(err, errSandboxForbidden) || strings.Contains(err.Error(), "forbidden") {
+			writeErr(w, http.StatusForbidden, err.Error())
+		} else {
+			writeErr(w, http.StatusNotFound, "sandbox not found")
+		}
 		return nil, false
 	}
 	return sb, true
+}
+
+// requireOwnedSandbox is the REST-shaped wrapper requiring OWNER role.
+func (s *Server) requireOwnedSandbox(w http.ResponseWriter, r *http.Request) (*db.Sandbox, bool) {
+	return s.requireSandboxRole(w, r, db.ProjectMemberRoleOwner)
 }
 
 // sandboxJSON renders a sandbox row plus computed fields the UI needs.
@@ -258,16 +245,16 @@ func (s *Server) sandboxJSON(sb *db.Sandbox) map[string]any {
 	}
 
 	return map[string]any{
-		"id":                   sb.ID,
-		"subdomain":            sb.Subdomain,
-		"url":                  sandboxURL,
-		"status":               sb.Status,
-		"branch":               sb.BranchName,
-		"githubBranch":         sb.BranchName,
-		"parent_sandbox_id":    sb.ParentSandboxID,
-		"container_id":         sb.ContainerID,
-		"internal_port":        sb.InternalPort,
-		"database_engine":      dbEngine,
+		"id":                            sb.ID,
+		"subdomain":                     sb.Subdomain,
+		"url":                           sandboxURL,
+		"status":                        sb.Status,
+		"branch":                        sb.BranchName,
+		"githubBranch":                  sb.BranchName,
+		"parent_sandbox_id":             sb.ParentSandboxID,
+		"container_id":                  sb.ContainerID,
+		"internal_port":                 sb.InternalPort,
+		"database_engine":               dbEngine,
 		"idle_timeout_seconds":          sb.IdleTimeoutSeconds,
 		"last_request_at":               sb.LastRequestAt,
 		"lifetime_seconds":              sb.LifetimeSeconds,

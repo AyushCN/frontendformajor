@@ -60,9 +60,9 @@ const (
 
 // User is a GitHub-authenticated account.
 type User struct {
-	ID          string    `gorm:"type:uuid;primaryKey"`
-	GithubID    int64     `gorm:"uniqueIndex;not null"`
-	Username    string    `gorm:"not null"`
+	ID          string `gorm:"type:uuid;primaryKey"`
+	GithubID    int64  `gorm:"uniqueIndex;not null"`
+	Username    string `gorm:"not null"`
 	Email       string
 	AvatarURL   string
 	GithubToken []byte    `gorm:"not null"` // AES-GCM encrypted at rest
@@ -84,20 +84,20 @@ func (Repository) TableName() string { return "repositories" }
 // Sandbox is the core entity: one running backend instance with its own
 // lifetime and idle-timeout controls.
 type Sandbox struct {
-	ID                 string         `gorm:"type:uuid;primaryKey"`
-	RepositoryID       string         `gorm:"type:uuid;not null"`
-	ParentSandboxID    *string        `gorm:"type:uuid"`
-	BranchName         string         `gorm:"not null"`
-	Subdomain          string         `gorm:"uniqueIndex;not null"`
-	Status             SandboxStatus  `gorm:"not null;default:queued"`
+	ID                 string        `gorm:"type:uuid;primaryKey"`
+	RepositoryID       string        `gorm:"type:uuid;not null"`
+	ParentSandboxID    *string       `gorm:"type:uuid"`
+	BranchName         string        `gorm:"not null"`
+	Subdomain          string        `gorm:"uniqueIndex;not null"`
+	Status             SandboxStatus `gorm:"not null;default:queued"`
 	ContainerID        string
 	ImageTag           string
 	InternalPort       int
-	IdleTimeoutSeconds int            `gorm:"not null;default:900"`
+	IdleTimeoutSeconds int `gorm:"not null;default:900"`
 	LastRequestAt      *time.Time
 
-	LifetimeSeconds   int64     `gorm:"not null;default:86400"`
-	ExpiresAt         time.Time `gorm:"not null"`
+	LifetimeSeconds int64     `gorm:"not null;default:86400"`
+	ExpiresAt       time.Time `gorm:"not null"`
 	// ActivatedAt is when the sandbox first reached running, and is the instant
 	// the lifetime clock starts from. It stays nil until then, which is what
 	// tells a first activation apart from a redeploy.
@@ -148,9 +148,9 @@ func (EnvVar) TableName() string { return "sandbox_env_vars" }
 // SandboxDatabase is a sidecar DB container (per-sandbox, on the sandbox's
 // private Docker network).
 type SandboxDatabase struct {
-	ID            string    `gorm:"type:uuid;primaryKey"`
-	SandboxID     string    `gorm:"type:uuid;not null"`
-	Engine        string    `gorm:"not null"` // postgres | mysql | sqlite
+	ID            string `gorm:"type:uuid;primaryKey"`
+	SandboxID     string `gorm:"type:uuid;not null"`
+	Engine        string `gorm:"not null"` // postgres | mysql | sqlite
 	ContainerID   string
 	ConnectionURL []byte    `gorm:"not null"` // encrypted
 	ForkedFrom    *string   `gorm:"type:uuid"`
@@ -192,4 +192,100 @@ type FileEdit struct {
 	EditedBy       string    `gorm:"type:uuid;not null"`
 	EditedAt       time.Time `gorm:"not null;default:now()"`
 	PushedToGithub bool      `gorm:"not null;default:false"`
+}
+
+// ---- Project & Collaboration Models -------------------------------------
+
+type ProjectMemberRole string
+
+const (
+	ProjectMemberRoleOwner  ProjectMemberRole = "OWNER"
+	ProjectMemberRoleEditor ProjectMemberRole = "EDITOR"
+	ProjectMemberRoleViewer ProjectMemberRole = "VIEWER"
+)
+
+type ProjectMemberStatus string
+
+const (
+	ProjectMemberStatusActive  ProjectMemberStatus = "ACTIVE"
+	ProjectMemberStatusPending ProjectMemberStatus = "PENDING"
+)
+
+type InvitationStatus string
+
+const (
+	InvitePending  InvitationStatus = "PENDING"
+	InviteAccepted InvitationStatus = "ACCEPTED"
+	InviteRejected InvitationStatus = "REJECTED"
+	InviteRevoked  InvitationStatus = "REVOKED"
+	InviteExpired  InvitationStatus = "EXPIRED"
+)
+
+type Project struct {
+	ID           string              `gorm:"type:uuid;primaryKey" json:"id"`
+	Name         string              `gorm:"not null" json:"name"`
+	Description  string              `gorm:"not null;default:''" json:"description"`
+	IsDefault    bool                `gorm:"not null;default:false" json:"isDefault"`
+	CreatedBy    string              `gorm:"type:uuid;not null" json:"createdBy"`
+	CreatedAt    time.Time           `gorm:"not null;default:now()" json:"createdAt"`
+	UpdatedAt    time.Time           `gorm:"not null;default:now()" json:"updatedAt"`
+	Members      []ProjectMember     `gorm:"foreignKey:ProjectID" json:"members,omitempty"`
+	Repositories []ProjectRepository `gorm:"foreignKey:ProjectID" json:"repositories,omitempty"`
+	Sandboxes    []ProjectSandbox    `gorm:"foreignKey:ProjectID" json:"sandboxes,omitempty"`
+}
+
+type ProjectRepository struct {
+	ID            string    `gorm:"type:uuid;primaryKey" json:"id"`
+	ProjectID     string    `gorm:"type:uuid;not null;index" json:"projectId"`
+	Name          string    `gorm:"not null" json:"name"`
+	GitURL        string    `gorm:"not null" json:"gitUrl"`
+	DefaultBranch string    `gorm:"not null;default:main" json:"defaultBranch"`
+	CreatedAt     time.Time `gorm:"not null;default:now()" json:"createdAt"`
+	UpdatedAt     time.Time `gorm:"not null;default:now()" json:"updatedAt"`
+}
+
+type ProjectMember struct {
+	ID         string              `gorm:"type:uuid;primaryKey" json:"id"`
+	ProjectID  string              `gorm:"type:uuid;not null;index" json:"projectId"`
+	UserID     string              `gorm:"type:uuid;not null;index" json:"userId"`
+	User       *User               `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	Role       ProjectMemberRole   `gorm:"not null" json:"role"`
+	Status     ProjectMemberStatus `gorm:"not null;default:'ACTIVE'" json:"status"`
+	InvitedBy  *string             `gorm:"type:uuid" json:"invitedBy,omitempty"`
+	InvitedAt  time.Time           `gorm:"not null;default:now()" json:"invitedAt"`
+	AcceptedAt *time.Time          `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time           `gorm:"not null;default:now()" json:"createdAt"`
+	UpdatedAt  time.Time           `gorm:"not null;default:now()" json:"updatedAt"`
+}
+
+type ProjectInvitation struct {
+	ID         string            `gorm:"type:uuid;primaryKey" json:"id"`
+	ProjectID  string            `gorm:"type:uuid;not null;index" json:"projectId"`
+	Project    *Project          `gorm:"foreignKey:ProjectID" json:"project,omitempty"`
+	InviterID  string            `gorm:"type:uuid;not null" json:"inviterId"`
+	Inviter    *User             `gorm:"foreignKey:InviterID" json:"inviter,omitempty"`
+	InviteeID  string            `gorm:"type:uuid;not null;index" json:"inviteeId"`
+	Invitee    *User             `gorm:"foreignKey:InviteeID" json:"invitee,omitempty"`
+	Role       ProjectMemberRole `gorm:"not null" json:"role"`
+	Status     InvitationStatus  `gorm:"not null;default:'PENDING';index" json:"status"`
+	ExpiresAt  time.Time         `gorm:"not null" json:"expiresAt"`
+	AcceptedAt *time.Time        `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time         `gorm:"not null;default:now()" json:"createdAt"`
+	UpdatedAt  time.Time         `gorm:"not null;default:now()" json:"updatedAt"`
+}
+
+type ProjectSandbox struct {
+	ProjectID string    `gorm:"type:uuid;primaryKey" json:"projectId"`
+	SandboxID string    `gorm:"type:uuid;primaryKey" json:"sandboxId"`
+	CreatedAt time.Time `gorm:"not null;default:now()" json:"createdAt"`
+}
+
+type AuditEvent struct {
+	ID        string         `gorm:"type:uuid;primaryKey" json:"id"`
+	ProjectID *string        `gorm:"type:uuid;index" json:"projectId,omitempty"`
+	UserID    *string        `gorm:"type:uuid" json:"userId,omitempty"`
+	Action    string         `gorm:"not null" json:"action"`
+	Resource  string         `gorm:"not null" json:"resource"`
+	Details   datatypes.JSON `json:"details,omitempty"`
+	CreatedAt time.Time      `gorm:"not null;default:now()" json:"createdAt"`
 }

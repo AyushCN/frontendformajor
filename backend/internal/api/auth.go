@@ -5,8 +5,11 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/api-sandbox-links/backend/internal/db"
 	gh "github.com/google/go-github/v66/github"
+	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 	oauth2github "golang.org/x/oauth2/github"
 )
@@ -23,7 +27,10 @@ import (
 // oauthStateCookie is the session cookie name. The value is an AES-encrypted
 // GitHub numeric ID; decryption doubles as authenticity (attacker-crafted
 // cookies fail authentication). See secret.Box.
-const oauthStateCookie = "asl_session"
+const (
+	oauthStateCookie = "asl_session"
+	oauthCsrfCookie  = "asl_oauth_state"
+)
 
 type ctxKey int
 
@@ -53,7 +60,25 @@ func (s *Server) handleAuthStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GitHub OAuth is not configured (GITHUB_CLIENT_ID missing). DevAuth is active; try the health endpoint.", http.StatusNotImplemented)
 		return
 	}
-	state := fmt.Sprintf("%d", time.Now().UnixNano())
+	// Generate cryptographically random state for CSRF protection
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		http.Error(w, "could not generate secure state", http.StatusInternalServerError)
+		return
+	}
+	state := hex.EncodeToString(b)
+
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasPrefix(s.cfg.FrontendURL, "https://")
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthCsrfCookie,
+		Value:    state,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecure,
+		MaxAge:   600, // 10 minutes
+	})
+
 	url := cfg.AuthCodeURL(state, oauth2.AccessTypeOffline)
 	http.Redirect(w, r, url, http.StatusFound)
 }
@@ -66,6 +91,28 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "OAuth not configured", http.StatusNotImplemented)
 		return
 	}
+
+	// 1. Verify CSRF state against cookie
+	stateQuery := r.URL.Query().Get("state")
+	stateCookie, err := r.Cookie(oauthCsrfCookie)
+	if err != nil || stateCookie.Value == "" || stateQuery == "" || stateCookie.Value != stateQuery {
+		s.logger.Warn("auth: state mismatch or missing state cookie", slog.String("query_state", stateQuery))
+		http.Error(w, "Invalid or expired OAuth state parameter (CSRF detected)", http.StatusBadRequest)
+		return
+	}
+
+	// Clear CSRF state cookie
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasPrefix(s.cfg.FrontendURL, "https://")
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthCsrfCookie,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecure,
+		MaxAge:   -1,
+	})
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "missing OAuth code", http.StatusBadRequest)
@@ -105,12 +152,16 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ensure the user's default personal project space exists
+	if createdUser, err := s.store.GetUserByGithubID(user.GithubID); err == nil && createdUser != nil {
+		_, _ = s.store.GetOrCreateDefaultProject(createdUser.ID)
+	}
+
 	session, err := s.box.Encrypt([]byte(strconv.FormatInt(user.GithubID, 10)))
 	if err != nil {
 		http.Error(w, "could not create session", http.StatusInternalServerError)
 		return
 	}
-	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasPrefix(s.cfg.FrontendURL, "https://")
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    string(session),
@@ -123,8 +174,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.cfg.FrontendURL+"/dashboard?authed=1", http.StatusFound)
 }
 
-// handleMe returns the current signed-in user (used by the frontend to decide
-// whether to show a login prompt).
+// handleMe returns the authoritative current signed-in user identity contract.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.userFrom(r)
 	if !ok {
@@ -132,8 +182,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         user.ID,
 		"github_id":  user.GithubID,
 		"username":   user.Username,
+		"email":      user.Email,
 		"avatar_url": user.AvatarURL,
 		"dev":        s.cfg.DevAuth,
 	})
@@ -156,7 +208,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure: r.TLS != nil,
+		Secure:   r.TLS != nil,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
@@ -261,16 +313,35 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		email = fmt.Sprintf("%s@users.api-sandbox.local", strings.ToLower(uname))
 	}
 
+	// Compute deterministic non-fixed positive int64 from username
+	h := fnv.New64a()
+	h.Write([]byte(uname))
+	githubID := int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF)
+	if githubID == 0 {
+		githubID = 1001
+	}
+
+	userID := uuid.NewString()
+	if existing, err := s.store.GetUserByGithubID(githubID); err == nil && existing != nil {
+		userID = existing.ID
+	}
+
+	encToken, _ := s.box.Encrypt([]byte(uname))
 	user := db.User{
-		ID:          "00000000-0000-0000-0000-000000000001",
-		GithubID:    1,
+		ID:          userID,
+		GithubID:    githubID,
 		Username:    uname,
 		Email:       email,
-		GithubToken: []byte(uname),
+		AvatarURL:   fmt.Sprintf("https://github.com/%s.png", uname),
+		GithubToken: encToken,
 	}
 	if err := s.store.UpsertUser(&user); err != nil {
 		s.logger.Warn("dev auth: could not upsert user", slog.String("err", err.Error()))
 	}
+
+	// Ensure personal default space exists
+	_, _ = s.store.GetOrCreateDefaultProject(user.ID)
+
 	session, err := s.box.Encrypt([]byte(strconv.FormatInt(user.GithubID, 10)))
 	if err != nil {
 		http.Error(w, "could not generate session", http.StatusInternalServerError)
@@ -286,7 +357,17 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   isSecure,
 		MaxAge:   30 * 24 * 3600, // 30 days
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": user})
+	// Return sanitized user contract without raw tokens or secrets
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"user": map[string]any{
+			"id":         user.ID,
+			"github_id":  user.GithubID,
+			"username":   user.Username,
+			"email":      user.Email,
+			"avatar_url": user.AvatarURL,
+		},
+	})
 }
 
 // handleSearchUsers searches registered users by username or email.

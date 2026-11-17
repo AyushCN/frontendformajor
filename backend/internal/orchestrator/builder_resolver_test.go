@@ -282,4 +282,3 @@ func TestBuilderResolver(t *testing.T) {
 		}
 	})
 }
-

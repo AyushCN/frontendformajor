@@ -1,25 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { acceptProjectInvitation } from "@/lib/projects-store";
 
 export async function POST(
   req: NextRequest,
   props: { params: Promise<{ id: string }> }
 ) {
   const { id } = await props.params;
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
+  const headers: Record<string, string> = {};
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
+
   try {
-    const body = await req.json().catch(() => ({}));
-    const proj = acceptProjectInvitation(id, body.user);
+    const res = await fetch(`${backend}/api/invitations/${id}/accept`, {
+      method: "POST",
+      headers,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return NextResponse.json(data, { status: res.status });
+    }
     return NextResponse.json({
       success: true,
       message: "Invitation accepted successfully",
-      project: proj,
-      projectId: proj.id,
+      ...data,
     });
   } catch (err: unknown) {
-    const msg = (err as Error).message || "Failed to accept invitation";
-    let status = 400;
-    if (msg.includes("not found")) status = 404;
-    return NextResponse.json({ error: msg }, { status });
+    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }
-

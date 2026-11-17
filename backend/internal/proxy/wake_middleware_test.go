@@ -185,5 +185,3 @@ func TestGatewayExpiredSandboxCannotBeWoken(t *testing.T) {
 		t.Errorf("expected sbPastExpiry to be recognized as expired")
 	}
 }
-
-

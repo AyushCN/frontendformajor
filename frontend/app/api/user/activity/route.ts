@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProjects } from "@/lib/projects-store";
 
 export interface AuditLog {
   id: string;
@@ -35,13 +34,11 @@ export async function GET(req: NextRequest) {
     const date = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
     const dayOfWeek = date.getDay(); // 0 is Sunday, 6 is Saturday
 
-    // Pseudo-random but deterministic pattern
     const seed = (daysAgo * 37 + dayOfWeek * 17) % 100;
     const isRecent = daysAgo < 90;
     const threshold = (dayOfWeek === 0 || dayOfWeek === 6) ? 70 : (isRecent ? 32 : 48);
 
     if (seed > threshold) {
-      // 1 to 5 contributions on active days
       const count = isRecent ? ((seed % 4) + 1) : ((seed % 3) + 1);
       for (let c = 0; c < count; c++) {
         const template = actionTemplates[(seed + c + daysAgo) % actionTemplates.length];
@@ -56,29 +53,33 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Real actions from local projects store
+  // Fetch real project activity from Go backend
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
   try {
-    const projects = getProjects();
-    for (const p of projects) {
-      activities.push({
-        id: `act-proj-${p.id}`,
-        action: "PROJECT_CREATED",
-        resource: `${p.name} workspace`,
-        timestamp: p.createdAt || new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
-      });
-      if (Array.isArray(p.collaborators)) {
-        for (const c of p.collaborators) {
-          activities.push({
-            id: `act-collab-${c.id || idCounter++}`,
-            action: "COLLABORATOR_SYNC",
-            resource: `${c.user?.username || "Collaborator"} (${c.role || "MEMBER"})`,
-            timestamp: c.acceptedAt || new Date(now.getTime() - 2 * 3600 * 1000).toISOString(),
-          });
-        }
+    const res = await fetch(`${backend}/api/projects`, {
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        ...(authHeader ? { authorization: authHeader } : {}),
+      },
+      cache: "no-store",
+    });
+    if (res.ok) {
+      const pData = await res.json();
+      const projects: any[] = Array.isArray(pData) ? pData : pData?.projects || [];
+      for (const p of projects) {
+        activities.push({
+          id: `act-proj-${p.id}`,
+          action: "PROJECT_CREATED",
+          resource: `${p.name} workspace`,
+          timestamp: p.created_at || p.createdAt || new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
+        });
       }
     }
   } catch {
-    // Ignore store read issues
+    // Ignore backend fetch errors
   }
 
   // Ensure high-fidelity recent activities for today & recent hours
@@ -87,7 +88,7 @@ export async function GET(req: NextRequest) {
       id: `act-recent-1`,
       action: "SANDBOX_START",
       resource: "sandbox-platform (main)",
-      timestamp: new Date(now.getTime() - 15 * 60 * 1000).toISOString(), // 15 mins ago
+      timestamp: new Date(now.getTime() - 15 * 60 * 1000).toISOString(),
     },
     {
       id: `act-recent-2`,

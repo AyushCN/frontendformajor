@@ -72,4 +72,3 @@ func TestHandleSearchUsers(t *testing.T) {
 		t.Fatalf("expected email alex@coollab.io, got %v", user["email"])
 	}
 }
-

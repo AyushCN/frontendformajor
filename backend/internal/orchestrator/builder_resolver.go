@@ -36,7 +36,7 @@ type ResolvedBuildConfig struct {
 	BuildCmd        string            `json:"build_cmd,omitempty"`
 	StartCmd        string            `json:"start_cmd,omitempty"`
 	Port            int               `json:"port"`
-	PreserveCmd     bool              `json:"preserve_cmd"`                // true when Dockerfile CMD/ENTRYPOINT is preserved
+	PreserveCmd     bool              `json:"preserve_cmd"` // true when Dockerfile CMD/ENTRYPOINT is preserved
 	Variables       map[string]string `json:"variables,omitempty"`
 }
 
@@ -163,4 +163,3 @@ func (r *BuilderResolver) ResolveBuilder(workDir string, userCfg *UserBuildConfi
 		return r.railpackBuilder, nil
 	}
 }
-

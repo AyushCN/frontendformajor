@@ -229,6 +229,41 @@ func (s *Server) Router() http.Handler {
 		protected.Get("/api/me", s.handleMe)
 		protected.Get("/api/users/search", s.handleSearchUsers)
 
+		protected.Route("/api/projects", func(pr chi.Router) {
+			pr.Get("/", s.handleListProjects)
+			pr.Post("/", s.handleCreateProject)
+			pr.Get("/{id}", s.handleGetProject)
+			pr.Put("/{id}", s.handleUpdateProject)
+			pr.Patch("/{id}", s.handleUpdateProject)
+			pr.Delete("/{id}", s.handleDeleteProject)
+			pr.Post("/{id}/transfer", s.handleTransferProjectOwnership)
+
+			pr.Get("/{id}/members", s.handleListProjectMembers)
+			pr.Patch("/{id}/members/{userId}", s.handleUpdateMemberRole)
+			pr.Delete("/{id}/members/{userId}", s.handleRemoveProjectMember)
+
+			pr.Get("/{id}/invitations", s.handleListProjectInvitations)
+			pr.Post("/{id}/invitations", s.handleCreateProjectInvitation)
+
+			pr.Get("/{id}/repositories", s.handleListProjectRepositories)
+			pr.Post("/{id}/repositories", s.handleAddProjectRepository)
+			pr.Delete("/{id}/repositories/{repoId}", s.handleRemoveProjectRepository)
+
+			pr.Get("/{id}/sandboxes", s.handleListProjectSandboxes)
+			pr.Post("/{id}/sandboxes", s.handleAssociateProjectSandbox)
+			pr.Delete("/{id}/sandboxes/{sandboxId}", s.handleDisassociateProjectSandbox)
+
+			pr.Get("/{id}/activity", s.handleListProjectActivity)
+		})
+
+		protected.Route("/api/invitations", func(ir chi.Router) {
+			ir.Get("/", s.handleListUserInvitations)
+			ir.Post("/{id}/accept", s.handleAcceptInvitation)
+			ir.Post("/{id}/reject", s.handleRejectInvitation)
+			ir.Post("/{id}/revoke", s.handleRevokeInvitation)
+			ir.Post("/{id}/resend", s.handleResendInvitation)
+		})
+
 		protected.Route("/api/sandboxes", func(pr chi.Router) {
 			pr.Get("/", s.handleListSandboxes)
 			pr.Post("/", s.handleCreateSandbox)

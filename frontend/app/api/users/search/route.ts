@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProjectById, getInvitations } from "@/lib/projects-store";
 
 interface RegisteredUser {
   id: string;
@@ -7,6 +6,8 @@ interface RegisteredUser {
   email: string;
   displayName: string;
   avatarUrl?: string;
+  isMember?: boolean;
+  isPending?: boolean;
 }
 
 export async function GET(req: NextRequest) {
@@ -18,31 +19,32 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ users: [] });
   }
 
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
+  const headers: Record<string, string> = {};
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
+
   // 1. Identify current authenticated user to exclude them from search results
   let currentUsername = "";
   let currentEmail = "";
   let currentUserId = "";
 
-  const backend = process.env.BACKEND_URL || "http://localhost:8080";
-  const cookie = req.headers.get("cookie") || "";
-  const authHeader = req.headers.get("authorization") || "";
-
   try {
     const meRes = await fetch(`${backend}/api/me`, {
-      headers: {
-        cookie,
-        ...(authHeader ? { authorization: authHeader } : {}),
-      },
+      headers,
       cache: "no-store",
     });
     if (meRes.ok) {
       const me = await meRes.json();
       currentUsername = (me.username || "").toLowerCase();
       currentEmail = (me.email || "").toLowerCase();
-      currentUserId = me.id || "";
+      currentUserId = (me.id || "").toLowerCase();
     }
   } catch {
-    // Fallback if backend offline
+    // Ignore error
   }
 
   // 2. Fetch registered DB users from backend
@@ -50,10 +52,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const remoteRes = await fetch(`${backend}/api/users/search?q=${encodeURIComponent(q)}`, {
-      headers: {
-        cookie,
-        ...(authHeader ? { authorization: authHeader } : {}),
-      },
+      headers,
       cache: "no-store",
     });
     if (remoteRes.ok) {
@@ -66,9 +65,9 @@ export async function GET(req: NextRequest) {
           const key = (ru.username || ru.email).toLowerCase();
           if (!allUsersMap.has(key)) {
             allUsersMap.set(key, {
-              id: ru.id || `user-${key}`,
+              id: ru.id || "",
               username: ru.username || key,
-              email: ru.email || `${key}@users.api-sandbox.local`,
+              email: ru.email || "",
               displayName: ru.displayName || ru.username || key,
               avatarUrl: ru.avatarUrl || "",
             });
@@ -77,21 +76,21 @@ export async function GET(req: NextRequest) {
       }
     }
   } catch {
-    // Remote backend search failed or endpoint not ready
+    // Backend search error
   }
 
-  // 3. Filter by query string
+  // 3. Filter by query string and exclude current user
   const matchedUsers: RegisteredUser[] = [];
   for (const u of allUsersMap.values()) {
     const uName = (u.username || "").toLowerCase();
     const uEmail = (u.email || "").toLowerCase();
     const uDisplay = (u.displayName || "").toLowerCase();
+    const uId = (u.id || "").toLowerCase();
 
-    // Exclude current user
     if (
-      uName === currentUsername ||
-      uEmail === currentEmail ||
-      (currentUserId && u.id === currentUserId)
+      (currentUsername && uName === currentUsername) ||
+      (currentEmail && uEmail === currentEmail) ||
+      (currentUserId && uId === currentUserId)
     ) {
       continue;
     }
@@ -101,32 +100,50 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 4. If projectId provided, check for existing membership and pending invitations
-  let memberIdentifiers = new Set<string>();
-  let pendingIdentifiers = new Set<string>();
+  // 4. If projectId provided, check for existing membership and pending invitations from backend
+  const memberIdentifiers = new Set<string>();
+  const pendingIdentifiers = new Set<string>();
 
   if (projectId) {
-    const proj = getProjectById(projectId);
-    if (proj && Array.isArray(proj.collaborators)) {
-      for (const c of proj.collaborators) {
-        if (c.user?.username) memberIdentifiers.add(c.user.username.toLowerCase());
-        if (c.user?.email) memberIdentifiers.add(c.user.email.toLowerCase());
-        if (c.userId) memberIdentifiers.add(c.userId.toLowerCase());
+    try {
+      // Check members
+      const memRes = await fetch(`${backend}/api/projects/${projectId}/members`, {
+        headers,
+        cache: "no-store",
+      });
+      if (memRes.ok) {
+        const memData = await memRes.json();
+        const members: any[] = Array.isArray(memData) ? memData : memData?.members || [];
+        for (const m of members) {
+          if (m.user?.username) memberIdentifiers.add(m.user.username.toLowerCase());
+          if (m.user?.email) memberIdentifiers.add(m.user.email.toLowerCase());
+          if (m.username) memberIdentifiers.add(m.username.toLowerCase());
+          if (m.email) memberIdentifiers.add(m.email.toLowerCase());
+          if (m.userId) memberIdentifiers.add(m.userId.toLowerCase());
+          if (m.user_id) memberIdentifiers.add(m.user_id.toLowerCase());
+        }
       }
-    }
 
-    const invites = getInvitations();
-    const now = new Date();
-    for (const inv of invites) {
-      if (
-        inv.projectId === projectId &&
-        inv.status === "PENDING" &&
-        new Date(inv.expiresAt) > now
-      ) {
-        const iden = inv.inviteeIdentifier.toLowerCase();
-        pendingIdentifiers.add(iden);
-        if (inv.inviteeId) pendingIdentifiers.add(inv.inviteeId.toLowerCase());
+      // Check pending invitations
+      const invRes = await fetch(`${backend}/api/projects/${projectId}/invitations`, {
+        headers,
+        cache: "no-store",
+      });
+      if (invRes.ok) {
+        const invData = await invRes.json();
+        const invitations: any[] = Array.isArray(invData) ? invData : invData?.invitations || [];
+        const now = new Date();
+        for (const inv of invitations) {
+          if (inv.status === "PENDING" && (!inv.expires_at || new Date(inv.expires_at) > now)) {
+            const iden = (inv.invitee_identifier || inv.inviteeIdentifier || "").toLowerCase();
+            if (iden) pendingIdentifiers.add(iden);
+            const invId = (inv.invitee_id || inv.inviteeId || "").toLowerCase();
+            if (invId) pendingIdentifiers.add(invId);
+          }
+        }
       }
+    } catch {
+      // Ignore
     }
   }
 
@@ -139,12 +156,12 @@ export async function GET(req: NextRequest) {
     const isMember =
       memberIdentifiers.has(uName) ||
       memberIdentifiers.has(uEmail) ||
-      memberIdentifiers.has(uId);
+      (uId ? memberIdentifiers.has(uId) : false);
 
     const isPending =
       pendingIdentifiers.has(uName) ||
       pendingIdentifiers.has(uEmail) ||
-      pendingIdentifiers.has(uId);
+      (uId ? pendingIdentifiers.has(uId) : false);
 
     return {
       id: u.id,
@@ -159,4 +176,3 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({ users: results });
 }
-

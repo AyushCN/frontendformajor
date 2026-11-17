@@ -75,4 +75,3 @@ func TestIPRateLimiterCleanup(t *testing.T) {
 		t.Errorf("expected 0 active IPs after cleanup, got %d", limiter.Stats().ActiveIPs)
 	}
 }
-

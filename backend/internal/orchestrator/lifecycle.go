@@ -180,7 +180,7 @@ type RunOptions struct {
 	NetworkName  string            // private per-sandbox network
 	Labels       map[string]string // extra labels (traefik, provenance)
 	User         string
-	Command      []string          // optional start command override
+	Command      []string // optional start command override
 }
 
 // RunResult reports where the container landed so callers can store it.

@@ -191,4 +191,3 @@ func readRailpackJSONStart(dir string) string {
 	}
 	return ""
 }
-

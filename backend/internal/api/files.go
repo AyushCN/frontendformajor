@@ -42,7 +42,7 @@ type FileContentResult struct {
 // handleFileTree lists every file under the sandbox's working directory,
 // recursively and sorted, so the editor sidebar can render a simple tree.
 func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -103,7 +103,7 @@ func readFileTree(rootHandle *os.Root) ([]fileEntry, error) {
 // handleFileContent returns one file's content. Binary files are base64-encoded
 // and flagged so the editor can warn before opening them.
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -213,7 +213,7 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}

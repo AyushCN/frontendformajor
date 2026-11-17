@@ -32,7 +32,7 @@ func (s *Server) handleCommitPush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}

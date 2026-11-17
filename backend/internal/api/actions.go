@@ -23,7 +23,7 @@ type extendLifetimeRequest struct {
 
 // handleListDeployments returns the sandbox's deploy/build history.
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -39,7 +39,7 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 // never past the hard cap (MaxLifetimeSeconds from original creation), and
 // recomputes lifetime_seconds so proportional warnings stay meaningful.
 func (s *Server) handleExtendLifetime(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
@@ -138,7 +138,7 @@ func (s *Server) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 // handleRedeploy triggers a manual rebuild (used after edits are saved and by
 // the "redeploy" button). Runs in the background.
 func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
@@ -158,7 +158,7 @@ func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateBranch(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
@@ -183,7 +183,7 @@ func (s *Server) handleUpdateBranch(w http.ResponseWriter, r *http.Request) {
 // handleSandboxWarnings returns the lifetime-warning state for a sandbox so
 // the frontend can render banners on list and detail views (section 2a req 3).
 func (s *Server) handleSandboxWarnings(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -331,7 +331,7 @@ type SandboxLogsResponse struct {
 
 // handleGetSandboxLogs provides a state-aware REST endpoint for container output.
 func (s *Server) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -425,7 +425,7 @@ func (s *Server) handleReportActivity(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -447,7 +447,7 @@ func (s *Server) handleReportActivity(w http.ResponseWriter, r *http.Request) {
 
 // handleLifecycleStatus provides real-time lifecycle tracking across all members.
 func (s *Server) handleLifecycleStatus(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -515,10 +515,10 @@ func (s *Server) handleLifecycleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSettingsRequest struct {
-	IdleTimeoutSeconds          *int   `json:"idleTimeoutSeconds"`
-	HibernatedExpirationSeconds *int64 `json:"hibernatedExpirationSeconds"`
-	WorkspaceRetentionSeconds   *int64 `json:"workspaceRetentionSeconds"`
-	LifetimeSeconds             *int64 `json:"lifetimeSeconds"`
+	IdleTimeoutSeconds          *int    `json:"idleTimeoutSeconds"`
+	HibernatedExpirationSeconds *int64  `json:"hibernatedExpirationSeconds"`
+	WorkspaceRetentionSeconds   *int64  `json:"workspaceRetentionSeconds"`
+	LifetimeSeconds             *int64  `json:"lifetimeSeconds"`
 	StartCommand                *string `json:"startCommand"`
 	Port                        *int    `json:"port"`
 	HealthCheckType             *string `json:"healthCheckType"`
@@ -573,7 +573,7 @@ func (s *Server) handleStartOperation(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
@@ -606,7 +606,7 @@ func (s *Server) handleStartOperation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEndOperation(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
@@ -677,4 +677,3 @@ func (s *Server) handleRestoreExpiredSandbox(w http.ResponseWriter, r *http.Requ
 		"new_id":      newID,
 	})
 }
-

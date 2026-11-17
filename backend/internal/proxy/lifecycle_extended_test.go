@@ -16,7 +16,7 @@ import (
 // the sandbox maintains active status and does not hibernate.
 func TestMultiUserActivity_OneActiveOneIdle(t *testing.T) {
 	activeMembers := map[string]time.Time{
-		"user-alice": time.Now().Add(-1 * time.Minute), // Alice was active 1 minute ago
+		"user-alice": time.Now().Add(-1 * time.Minute),  // Alice was active 1 minute ago
 		"user-bob":   time.Now().Add(-30 * time.Minute), // Bob idle for 30 minutes
 	}
 

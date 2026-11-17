@@ -425,7 +425,7 @@ func (s *Store) OwnsSandbox(sandboxID, userID string) (bool, error) {
 }
 
 // CanAccessSandbox reports whether userID is authorized to access the sandbox
-// (either as repository owner or as an active project member).
+// (either as direct repository owner or as an active project member).
 func (s *Store) CanAccessSandbox(sandboxID, userID string) (bool, error) {
 	if sandboxID == "" || userID == "" {
 		return false, nil
@@ -434,15 +434,14 @@ func (s *Store) CanAccessSandbox(sandboxID, userID string) (bool, error) {
 	if err == nil && owns {
 		return true, nil
 	}
-	// Check project_members if table exists
-	if s.db.Migrator().HasTable("project_members") {
-		var memberCount int64
-		_ = s.db.Table("project_members").
-			Where("sandbox_id = ? AND user_id = ? AND role != 'REVOKED'", sandboxID, userID).
-			Count(&memberCount).Error
-		if memberCount > 0 {
-			return true, nil
-		}
+	// Check project_sandboxes + project_members
+	var memberCount int64
+	err = s.db.Table("project_sandboxes").
+		Joins("JOIN project_members ON project_members.project_id = project_sandboxes.project_id").
+		Where("project_sandboxes.sandbox_id = ? AND project_members.user_id = ? AND project_members.status = 'ACTIVE'", sandboxID, userID).
+		Count(&memberCount).Error
+	if err == nil && memberCount > 0 {
+		return true, nil
 	}
 	return false, nil
 }
@@ -708,3 +707,645 @@ func (s *Store) RecoverStuckDeployments(olderThan time.Duration, reason string) 
 	return affected, nil
 }
 
+// ---- Projects & Collaboration -------------------------------------------
+
+// GetOrCreateDefaultProject retrieves or creates the authenticated user's private personal project.
+func (s *Store) GetOrCreateDefaultProject(userID string) (*Project, error) {
+	if userID == "" {
+		return nil, errors.New("db: user ID required for default project")
+	}
+
+	var p Project
+	err := s.db.Where("created_by = ? AND is_default = true", userID).
+		Preload("Members.User").
+		Preload("Repositories").
+		Preload("Sandboxes").
+		First(&p).Error
+
+	if err == nil {
+		return &p, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("db: fetching default project: %w", err)
+	}
+
+	// Create default personal project
+	p = Project{
+		ID:          newID(),
+		Name:        "Default Project (Personal)",
+		Description: "Personal private development environment",
+		IsDefault:   true,
+		CreatedBy:   userID,
+	}
+
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&p).Error; err != nil {
+			return err
+		}
+		member := ProjectMember{
+			ID:        newID(),
+			ProjectID: p.ID,
+			UserID:    userID,
+			Role:      ProjectMemberRoleOwner,
+			Status:    ProjectMemberStatusActive,
+		}
+		return tx.Create(&member).Error
+	})
+	if err != nil {
+		return nil, fmt.Errorf("db: creating default project: %w", err)
+	}
+
+	return s.GetProject(p.ID)
+}
+
+// CreateProject creates a new user project and assigns the creator as OWNER.
+func (s *Store) CreateProject(p *Project, userID string) (*Project, error) {
+	if p.Name == "" {
+		return nil, errors.New("db: project name cannot be empty")
+	}
+	if userID == "" {
+		return nil, errors.New("db: creator user ID required")
+	}
+
+	p.ID = newID()
+	p.CreatedBy = userID
+	p.IsDefault = false
+
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(p).Error; err != nil {
+			return err
+		}
+		member := ProjectMember{
+			ID:        newID(),
+			ProjectID: p.ID,
+			UserID:    userID,
+			Role:      ProjectMemberRoleOwner,
+			Status:    ProjectMemberStatusActive,
+		}
+		if err := tx.Create(&member).Error; err != nil {
+			return err
+		}
+		return tx.Create(&AuditEvent{
+			ID:        newID(),
+			ProjectID: &p.ID,
+			UserID:    &userID,
+			Action:    "PROJECT_CREATE",
+			Resource:  "project:" + p.ID,
+		}).Error
+	})
+	if err != nil {
+		return nil, fmt.Errorf("db: creating project: %w", err)
+	}
+
+	return s.GetProject(p.ID)
+}
+
+// GetProject returns a project with members, repositories, and sandboxes loaded.
+func (s *Store) GetProject(projectID string) (*Project, error) {
+	var p Project
+	err := s.db.Where("id = ?", projectID).
+		Preload("Members.User").
+		Preload("Repositories").
+		Preload("Sandboxes").
+		First(&p).Error
+	if err != nil {
+		return nil, fmt.Errorf("db: get project %s: %w", projectID, err)
+	}
+	return &p, nil
+}
+
+// ListUserProjects returns all projects accessible to the user (owned or shared membership).
+func (s *Store) ListUserProjects(userID string) ([]*Project, error) {
+	if userID == "" {
+		return nil, errors.New("db: user ID required to list projects")
+	}
+
+	// Ensure user's default personal space exists
+	_, _ = s.GetOrCreateDefaultProject(userID)
+
+	var projects []*Project
+	err := s.db.Distinct().
+		Joins("LEFT JOIN project_members ON project_members.project_id = projects.id").
+		Where("projects.created_by = ? OR (project_members.user_id = ? AND project_members.status = 'ACTIVE')", userID, userID).
+		Preload("Members.User").
+		Preload("Repositories").
+		Preload("Sandboxes").
+		Order("projects.is_default DESC, projects.created_at ASC").
+		Find(&projects).Error
+
+	if err != nil {
+		return nil, fmt.Errorf("db: listing user projects: %w", err)
+	}
+	return projects, nil
+}
+
+// UpdateProject updates project name and description. Only Owner can modify.
+func (s *Store) UpdateProject(projectID, userID, name, description string) (*Project, error) {
+	p, err := s.GetProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	role, err := s.GetProjectRole(projectID, userID)
+	if err != nil || role != ProjectMemberRoleOwner {
+		return nil, errors.New("access denied: only the project owner can modify settings")
+	}
+
+	updates := map[string]any{
+		"updated_at": time.Now().UTC(),
+	}
+	if name != "" {
+		updates["name"] = name
+	}
+	if description != "" {
+		updates["description"] = description
+	}
+
+	if err := s.db.Model(p).Updates(updates).Error; err != nil {
+		return nil, fmt.Errorf("db: updating project: %w", err)
+	}
+
+	_ = s.RecordAuditEvent(&AuditEvent{
+		ID:        newID(),
+		ProjectID: &projectID,
+		UserID:    &userID,
+		Action:    "PROJECT_UPDATE",
+		Resource:  "project:" + projectID,
+	})
+
+	return s.GetProject(projectID)
+}
+
+// DeleteProject deletes a project and cascades cleanup. Default project cannot be deleted.
+func (s *Store) DeleteProject(projectID, userID string) error {
+	p, err := s.GetProject(projectID)
+	if err != nil {
+		return err
+	}
+	if p.IsDefault {
+		return errors.New("cannot delete default personal project")
+	}
+	role, err := s.GetProjectRole(projectID, userID)
+	if err != nil || role != ProjectMemberRoleOwner {
+		return errors.New("access denied: only the project owner can delete this project")
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&Project{}, "id = ?", projectID).Error; err != nil {
+			return err
+		}
+		return tx.Create(&AuditEvent{
+			ID:       newID(),
+			UserID:   &userID,
+			Action:   "PROJECT_DELETE",
+			Resource: "project:" + projectID,
+		}).Error
+	})
+}
+
+// AddProjectRepository associates a Git repository with a project.
+func (s *Store) AddProjectRepository(repo *ProjectRepository) error {
+	if repo.ID == "" {
+		repo.ID = newID()
+	}
+	return s.db.Create(repo).Error
+}
+
+// ListProjectRepositories returns all repositories connected to a project.
+func (s *Store) ListProjectRepositories(projectID string) ([]*ProjectRepository, error) {
+	var repos []*ProjectRepository
+	err := s.db.Where("project_id = ?", projectID).Find(&repos).Error
+	return repos, err
+}
+
+// RemoveProjectRepository disassociates a repository from a project.
+func (s *Store) RemoveProjectRepository(projectID, repoID string) error {
+	return s.db.Delete(&ProjectRepository{}, "project_id = ? AND id = ?", projectID, repoID).Error
+}
+
+// AssociateProjectSandbox links a sandbox to a project.
+func (s *Store) AssociateProjectSandbox(projectID, sandboxID string) error {
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&ProjectSandbox{
+		ProjectID: projectID,
+		SandboxID: sandboxID,
+	}).Error
+}
+
+// DisassociateProjectSandbox removes a sandbox link from a project.
+func (s *Store) DisassociateProjectSandbox(projectID, sandboxID string) error {
+	return s.db.Delete(&ProjectSandbox{}, "project_id = ? AND sandbox_id = ?", projectID, sandboxID).Error
+}
+
+// ListProjectSandboxes returns all active sandboxes associated with a project.
+func (s *Store) ListProjectSandboxes(projectID string) ([]*Sandbox, error) {
+	var sandboxes []*Sandbox
+	err := s.db.Joins("JOIN project_sandboxes ON project_sandboxes.sandbox_id = sandboxes.id").
+		Where("project_sandboxes.project_id = ? AND sandboxes.destroyed_at IS NULL", projectID).
+		Find(&sandboxes).Error
+	return sandboxes, err
+}
+
+// GetProjectRole returns the user's role in a project (OWNER, EDITOR, VIEWER).
+func (s *Store) GetProjectRole(projectID, userID string) (ProjectMemberRole, error) {
+	if projectID == "" || userID == "" {
+		return "", errors.New("db: project and user ID required")
+	}
+
+	var p Project
+	if err := s.db.Select("id, created_by, is_default").Where("id = ?", projectID).First(&p).Error; err == nil {
+		if p.CreatedBy == userID {
+			return ProjectMemberRoleOwner, nil
+		}
+	}
+
+	var member ProjectMember
+	err := s.db.Where("project_id = ? AND user_id = ? AND status = 'ACTIVE'", projectID, userID).First(&member).Error
+	if err != nil {
+		return "", fmt.Errorf("db: member not found: %w", err)
+	}
+	return member.Role, nil
+}
+
+// GetSandboxRole returns the user's highest effective role for a sandbox.
+func (s *Store) GetSandboxRole(sandboxID, userID string) (ProjectMemberRole, error) {
+	if sandboxID == "" || userID == "" {
+		return "", errors.New("db: sandbox and user ID required")
+	}
+
+	// 1. Direct ownership
+	owns, err := s.OwnsSandbox(sandboxID, userID)
+	if err == nil && owns {
+		return ProjectMemberRoleOwner, nil
+	}
+
+	// 2. Project membership
+	var roles []ProjectMemberRole
+	err = s.db.Model(&ProjectMember{}).
+		Select("project_members.role").
+		Joins("JOIN project_sandboxes ON project_sandboxes.project_id = project_members.project_id").
+		Where("project_sandboxes.sandbox_id = ? AND project_members.user_id = ? AND project_members.status = 'ACTIVE'", sandboxID, userID).
+		Pluck("role", &roles).Error
+
+	if err == nil && len(roles) > 0 {
+		for _, r := range roles {
+			if r == ProjectMemberRoleOwner {
+				return ProjectMemberRoleOwner, nil
+			}
+		}
+		for _, r := range roles {
+			if r == ProjectMemberRoleEditor {
+				return ProjectMemberRoleEditor, nil
+			}
+		}
+		return ProjectMemberRoleViewer, nil
+	}
+
+	return "", errors.New("access denied: user has no authorized role for this sandbox")
+}
+
+// ListProjectMembers returns all active project members with populated User info.
+func (s *Store) ListProjectMembers(projectID string) ([]*ProjectMember, error) {
+	var members []*ProjectMember
+	err := s.db.Where("project_id = ?", projectID).
+		Preload("User").
+		Order("role ASC, created_at ASC").
+		Find(&members).Error
+	return members, err
+}
+
+// UpdateMemberRole modifies a member's role (Editor <-> Viewer). Only Owner can execute.
+func (s *Store) UpdateMemberRole(projectID, targetUserID string, newRole ProjectMemberRole, actorID string) error {
+	actorRole, err := s.GetProjectRole(projectID, actorID)
+	if err != nil || actorRole != ProjectMemberRoleOwner {
+		return errors.New("access denied: only the project owner can change member roles")
+	}
+
+	p, err := s.GetProject(projectID)
+	if err != nil {
+		return err
+	}
+	if p.CreatedBy == targetUserID {
+		return errors.New("cannot change role of the project creator")
+	}
+
+	return s.db.Model(&ProjectMember{}).
+		Where("project_id = ? AND user_id = ?", projectID, targetUserID).
+		Updates(map[string]any{
+			"role":       newRole,
+			"updated_at": time.Now().UTC(),
+		}).Error
+}
+
+// RemoveProjectMember removes a member from a project.
+func (s *Store) RemoveProjectMember(projectID, targetUserID, actorID string) error {
+	actorRole, err := s.GetProjectRole(projectID, actorID)
+	if err != nil {
+		return err
+	}
+	if actorRole != ProjectMemberRoleOwner && actorID != targetUserID {
+		return errors.New("access denied: only the project owner or the member themselves can remove membership")
+	}
+
+	p, err := s.GetProject(projectID)
+	if err != nil {
+		return err
+	}
+	if p.CreatedBy == targetUserID {
+		return errors.New("cannot remove the project creator from the project")
+	}
+
+	return s.db.Delete(&ProjectMember{}, "project_id = ? AND user_id = ?", projectID, targetUserID).Error
+}
+
+// TransferProjectOwnership transfers project ownership to another registered user.
+func (s *Store) TransferProjectOwnership(projectID, newOwnerID, currentOwnerID string) error {
+	p, err := s.GetProject(projectID)
+	if err != nil {
+		return err
+	}
+	if p.CreatedBy != currentOwnerID {
+		return errors.New("access denied: only the current project owner can transfer ownership")
+	}
+	if p.IsDefault {
+		return errors.New("cannot transfer ownership of the default personal space")
+	}
+	if newOwnerID == currentOwnerID {
+		return errors.New("new owner must be different from current owner")
+	}
+
+	// Verify new owner is a registered user
+	if _, err := s.GetUser(newOwnerID); err != nil {
+		return fmt.Errorf("new owner must be a valid registered user: %w", err)
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Update project created_by
+		if err := tx.Model(p).Update("created_by", newOwnerID).Error; err != nil {
+			return err
+		}
+		// 2. Demote current owner to EDITOR
+		if err := tx.Model(&ProjectMember{}).
+			Where("project_id = ? AND user_id = ?", projectID, currentOwnerID).
+			Update("role", ProjectMemberRoleEditor).Error; err != nil {
+			return err
+		}
+		// 3. Promote or insert new owner as OWNER
+		var newMember ProjectMember
+		err := tx.Where("project_id = ? AND user_id = ?", projectID, newOwnerID).First(&newMember).Error
+		if err == nil {
+			if err := tx.Model(&newMember).Update("role", ProjectMemberRoleOwner).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Create(&ProjectMember{
+				ID:        newID(),
+				ProjectID: projectID,
+				UserID:    newOwnerID,
+				Role:      ProjectMemberRoleOwner,
+				Status:    ProjectMemberStatusActive,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		return tx.Create(&AuditEvent{
+			ID:        newID(),
+			ProjectID: &projectID,
+			UserID:    &currentOwnerID,
+			Action:    "PROJECT_TRANSFER_OWNERSHIP",
+			Resource:  fmt.Sprintf("project:%s:to:%s", projectID, newOwnerID),
+		}).Error
+	})
+}
+
+// CreateInvitation creates an atomic pending collaboration invitation.
+func (s *Store) CreateInvitation(inv *ProjectInvitation) error {
+	p, err := s.GetProject(inv.ProjectID)
+	if err != nil {
+		return err
+	}
+	if p.IsDefault {
+		return errors.New("cannot invite collaborators to a default personal project")
+	}
+
+	role, err := s.GetProjectRole(inv.ProjectID, inv.InviterID)
+	if err != nil || role != ProjectMemberRoleOwner {
+		return errors.New("access denied: only the project owner can send member invitations")
+	}
+
+	if inv.InviteeID == inv.InviterID {
+		return errors.New("cannot invite yourself to a project")
+	}
+
+	// Verify recipient exists
+	if _, err := s.GetUser(inv.InviteeID); err != nil {
+		return fmt.Errorf("recipient user not found: %w", err)
+	}
+
+	// Verify recipient is not already an active member
+	var existingMember ProjectMember
+	if err := s.db.Where("project_id = ? AND user_id = ? AND status = 'ACTIVE'", inv.ProjectID, inv.InviteeID).First(&existingMember).Error; err == nil {
+		return errors.New("user is already an active member of this project")
+	}
+
+	// Verify no pending invitation exists
+	var pendingInv ProjectInvitation
+	if err := s.db.Where("project_id = ? AND invitee_id = ? AND status = 'PENDING' AND expires_at > ?", inv.ProjectID, inv.InviteeID, time.Now().UTC()).First(&pendingInv).Error; err == nil {
+		return errors.New("an active invitation is already pending for this user")
+	}
+
+	inv.ID = newID()
+	inv.Status = InvitePending
+	if inv.ExpiresAt.IsZero() {
+		inv.ExpiresAt = time.Now().UTC().Add(7 * 24 * time.Hour)
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(inv).Error; err != nil {
+			return err
+		}
+		return tx.Create(&AuditEvent{
+			ID:        newID(),
+			ProjectID: &inv.ProjectID,
+			UserID:    &inv.InviterID,
+			Action:    "INVITATION_CREATE",
+			Resource:  fmt.Sprintf("invitation:%s:invitee:%s", inv.ID, inv.InviteeID),
+		}).Error
+	})
+}
+
+// GetInvitation fetches an invitation by ID with preloads.
+func (s *Store) GetInvitation(id string) (*ProjectInvitation, error) {
+	var inv ProjectInvitation
+	err := s.db.Where("id = ?", id).
+		Preload("Project").
+		Preload("Inviter").
+		Preload("Invitee").
+		First(&inv).Error
+	if err != nil {
+		return nil, fmt.Errorf("db: get invitation %s: %w", id, err)
+	}
+	return &inv, nil
+}
+
+// ListPendingProjectInvitations returns active pending invitations for a project.
+func (s *Store) ListPendingProjectInvitations(projectID string) ([]*ProjectInvitation, error) {
+	var invs []*ProjectInvitation
+	err := s.db.Where("project_id = ? AND status = 'PENDING' AND expires_at > ?", projectID, time.Now().UTC()).
+		Preload("Invitee").
+		Preload("Inviter").
+		Order("created_at DESC").
+		Find(&invs).Error
+	return invs, err
+}
+
+// ListUserInvitations returns pending invitations received by the user.
+func (s *Store) ListUserInvitations(userID string) ([]*ProjectInvitation, error) {
+	var invs []*ProjectInvitation
+	err := s.db.Where("invitee_id = ? AND status = 'PENDING' AND expires_at > ?", userID, time.Now().UTC()).
+		Preload("Project").
+		Preload("Inviter").
+		Order("created_at DESC").
+		Find(&invs).Error
+	return invs, err
+}
+
+// AcceptInvitation atomically accepts an invitation and adds the user to project_members.
+func (s *Store) AcceptInvitation(invitationID, userID string) error {
+	now := time.Now().UTC()
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var inv ProjectInvitation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", invitationID).First(&inv).Error; err != nil {
+			return fmt.Errorf("invitation not found: %w", err)
+		}
+
+		if inv.InviteeID != userID {
+			return errors.New("access denied: this invitation was addressed to another user")
+		}
+		if inv.Status != InvitePending {
+			return fmt.Errorf("invitation cannot be accepted (current status: %s)", inv.Status)
+		}
+		if now.After(inv.ExpiresAt) {
+			_ = tx.Model(&inv).Update("status", InviteExpired)
+			return errors.New("invitation has expired")
+		}
+
+		// 1. Mark invitation accepted
+		if err := tx.Model(&inv).Updates(map[string]any{
+			"status":      InviteAccepted,
+			"accepted_at": now,
+			"updated_at":  now,
+		}).Error; err != nil {
+			return err
+		}
+
+		// 2. Add or update project_members row
+		var member ProjectMember
+		err := tx.Where("project_id = ? AND user_id = ?", inv.ProjectID, userID).First(&member).Error
+		if err == nil {
+			if err := tx.Model(&member).Updates(map[string]any{
+				"role":        inv.Role,
+				"status":      ProjectMemberStatusActive,
+				"accepted_at": now,
+				"updated_at":  now,
+			}).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Create(&ProjectMember{
+				ID:         newID(),
+				ProjectID:  inv.ProjectID,
+				UserID:     userID,
+				Role:       inv.Role,
+				Status:     ProjectMemberStatusActive,
+				InvitedBy:  &inv.InviterID,
+				AcceptedAt: &now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		// 3. Audit trail
+		return tx.Create(&AuditEvent{
+			ID:        newID(),
+			ProjectID: &inv.ProjectID,
+			UserID:    &userID,
+			Action:    "INVITATION_ACCEPT",
+			Resource:  "invitation:" + invitationID,
+		}).Error
+	})
+}
+
+// RejectInvitation marks an invitation rejected.
+func (s *Store) RejectInvitation(invitationID, userID string) error {
+	inv, err := s.GetInvitation(invitationID)
+	if err != nil {
+		return err
+	}
+	if inv.InviteeID != userID {
+		return errors.New("access denied: cannot reject invitation addressed to another user")
+	}
+
+	return s.db.Model(inv).Updates(map[string]any{
+		"status":     InviteRejected,
+		"updated_at": time.Now().UTC(),
+	}).Error
+}
+
+// RevokeInvitation allows project owner or inviter to cancel a pending invitation.
+func (s *Store) RevokeInvitation(invitationID, actorID string) error {
+	inv, err := s.GetInvitation(invitationID)
+	if err != nil {
+		return err
+	}
+
+	role, err := s.GetProjectRole(inv.ProjectID, actorID)
+	if err != nil || (role != ProjectMemberRoleOwner && inv.InviterID != actorID) {
+		return errors.New("access denied: only the project owner or inviter can revoke this invitation")
+	}
+
+	return s.db.Model(inv).Updates(map[string]any{
+		"status":     InviteRevoked,
+		"updated_at": time.Now().UTC(),
+	}).Error
+}
+
+// ResendInvitation resets the expiration of a pending invitation.
+func (s *Store) ResendInvitation(invitationID, actorID string) error {
+	inv, err := s.GetInvitation(invitationID)
+	if err != nil {
+		return err
+	}
+
+	role, err := s.GetProjectRole(inv.ProjectID, actorID)
+	if err != nil || (role != ProjectMemberRoleOwner && inv.InviterID != actorID) {
+		return errors.New("access denied: only the project owner or inviter can resend this invitation")
+	}
+
+	return s.db.Model(inv).Updates(map[string]any{
+		"status":     InvitePending,
+		"expires_at": time.Now().UTC().Add(7 * 24 * time.Hour),
+		"updated_at": time.Now().UTC(),
+	}).Error
+}
+
+// RecordAuditEvent writes an immutable audit record.
+func (s *Store) RecordAuditEvent(event *AuditEvent) error {
+	if event.ID == "" {
+		event.ID = newID()
+	}
+	return s.db.Create(event).Error
+}
+
+// ListAuditEvents lists audit events for a project.
+func (s *Store) ListAuditEvents(projectID string, limit int) ([]*AuditEvent, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var events []*AuditEvent
+	err := s.db.Where("project_id = ?", projectID).
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&events).Error
+	return events, err
+}
