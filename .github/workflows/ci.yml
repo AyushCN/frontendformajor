@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "master", "production" ]
+    branches: [ "main", "master", "production", "frontend" ]
   pull_request:
-    branches: [ "main", "master", "production" ]
+    branches: [ "main", "master", "production", "frontend" ]
 
 jobs:
   lint-and-unit-tests:
@@ -82,6 +82,13 @@ jobs:
           if [ -f /proc/sys/kernel/unprivileged_userns_clone ]; then
             sudo sysctl -w kernel.unprivileged_userns_clone=1
           fi
+
+          # Allow host and container traffic forwarding across Docker custom bridge networks
+          sudo iptables -P FORWARD ACCEPT || true
+          # Docker's DOCKER-USER chain is evaluated before the FORWARD policy.
+          # Permit the host-side smoke test to probe containers on per-sandbox
+          # bridge networks created by the orchestrator.
+          sudo iptables -C DOCKER-USER -j ACCEPT 2>/dev/null || sudo iptables -I DOCKER-USER -j ACCEPT
 
       - name: Start Infrastructure Containers
         run: |
@@ -164,3 +171,31 @@ jobs:
         if: always()
         run: |
           docker compose -f docker-compose.dev.yml down -v
+
+  frontend-build:
+    name: Frontend TypeScript & Build Verification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Production build
+        run: npm run build
+        env:
+          BACKEND_URL: http://localhost:8080

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/db"
+	"github.com/api-sandbox-links/backend/internal/git"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
 	"github.com/api-sandbox-links/backend/internal/workspacelock"
 )
@@ -41,7 +42,7 @@ type FileContentResult struct {
 // handleFileTree lists every file under the sandbox's working directory,
 // recursively and sorted, so the editor sidebar can render a simple tree.
 func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -102,7 +103,7 @@ func readFileTree(rootHandle *os.Root) ([]fileEntry, error) {
 // handleFileContent returns one file's content. Binary files are base64-encoded
 // and flagged so the editor can warn before opening them.
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -212,11 +213,11 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
-	s.touchSandbox(r.Context(), sb)
+	s.touchSandbox(r.Context(), sb, user.ID)
 	if sb.DestroyedAt != nil || sb.Status == db.StatusDeleted || sb.Status == db.StatusExpired {
 		writeErr(w, http.StatusConflict, "sandbox is destroyed; nothing to edit")
 		return
@@ -363,6 +364,19 @@ func (s *Server) sandboxRoot(sandboxID string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = os.MkdirAll(s.cfg.SandboxWorkDir, 0o755)
+	targetDir := filepath.Join(s.cfg.SandboxWorkDir, sb.Subdomain)
+	if fi, err := os.Stat(targetDir); os.IsNotExist(err) || (err == nil && !fi.IsDir()) {
+		if repo, repoErr := s.store.GetRepository(sb.RepositoryID); repoErr == nil && repo.GithubURL != "" {
+			branch := sb.BranchName
+			if branch == "" {
+				branch = repo.DefaultBranch
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			_, _ = git.Clone(ctx, repo.GithubURL, branch, targetDir)
+			cancel()
+		}
+	}
 	return openSandboxRoot(s.cfg.SandboxWorkDir, sb.Subdomain)
 }
 
@@ -385,6 +399,11 @@ func openSandboxRoot(workDir, subdomain string) (*os.Root, error) {
 
 	fi, err := parentRoot.Lstat(subdomain)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if mkErr := parentRoot.Mkdir(subdomain, 0o755); mkErr == nil {
+				return parentRoot.OpenRoot(subdomain)
+			}
+		}
 		return nil, err
 	}
 	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {

@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProjectById, filterSandboxesForProject, addProjectRepository } from "@/lib/projects-store";
 
 export async function GET(
   req: NextRequest,
@@ -8,50 +7,25 @@ export async function GET(
   const { id } = await props.params;
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
   const cookie = req.headers.get("cookie") || "";
-  const proj = getProjectById(id);
+  const authHeader = req.headers.get("authorization") || "";
 
-  const repos: any[] = [];
-  const seen = new Set<string>();
-
-  // Add any explicitly registered repositories in this project
-  if (proj?.repositories && Array.isArray(proj.repositories)) {
-    for (const r of proj.repositories) {
-      if (!seen.has(r.gitUrl)) {
-        seen.add(r.gitUrl);
-        repos.push(r);
-      }
-    }
-  }
+  const headers: Record<string, string> = {};
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
 
   try {
-    const res = await fetch(`${backend}/api/sandboxes`, {
-      headers: { cookie },
+    const res = await fetch(`${backend}/api/projects/${id}/repositories`, {
+      headers,
       cache: "no-store",
     });
-
     if (res.ok) {
       const data = await res.json();
-      const allSandboxes = Array.isArray(data) ? data : data?.sandboxes || [];
-      const projectSandboxes = filterSandboxesForProject(id, allSandboxes);
-
-      for (const sb of projectSandboxes) {
-        const url = sb.repo_url || sb.gitUrl || sb.url;
-        if (url && !seen.has(url)) {
-          seen.add(url);
-          repos.push({
-            id: `repo-${sb.id}`,
-            name: sb.name || sb.subdomain || "sandbox-repo",
-            gitUrl: url,
-            defaultBranch: sb.branch || "main",
-          });
-        }
-      }
+      return NextResponse.json(data.repositories || data || []);
     }
+    return NextResponse.json([], { status: res.status });
   } catch {
-    // Fallback if backend is unreachable
+    return NextResponse.json([], { status: 500 });
   }
-
-  return NextResponse.json(repos);
 }
 
 export async function POST(
@@ -59,17 +33,23 @@ export async function POST(
   props: { params: Promise<{ id: string }> }
 ) {
   const { id } = await props.params;
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
+
   try {
-    const body = await req.json();
-    const { name, gitUrl, defaultBranch } = body;
-    if (!name || !gitUrl) {
-      return NextResponse.json({ error: "Name and gitUrl are required" }, { status: 400 });
-    }
-    const newRepo = addProjectRepository(id, { name, gitUrl, defaultBranch });
-    if (!newRepo) {
-      return NextResponse.json({ error: "Project not found" }, { status: 404 });
-    }
-    return NextResponse.json(newRepo, { status: 201 });
+    const body = await req.json().catch(() => ({}));
+    const res = await fetch(`${backend}/api/projects/${id}/repositories`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    return NextResponse.json(data, { status: res.status });
   } catch (err: unknown) {
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }

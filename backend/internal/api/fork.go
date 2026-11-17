@@ -25,7 +25,7 @@ import (
 // (capped), because a fork that outlives its source material would be
 // surprising. // DECISION: remaining-lifetime inheritance.
 func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
-	parent, ok := s.requireOwnedSandbox(w, r)
+	parent, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}

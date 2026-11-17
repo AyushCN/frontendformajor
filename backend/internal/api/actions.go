@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/db"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
+	"github.com/google/uuid"
 )
 
 // extendLifetimeRequest is the body of POST /{id}/actions/extend.
@@ -20,7 +23,7 @@ type extendLifetimeRequest struct {
 
 // handleListDeployments returns the sandbox's deploy/build history.
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -36,12 +39,12 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 // never past the hard cap (MaxLifetimeSeconds from original creation), and
 // recomputes lifetime_seconds so proportional warnings stay meaningful.
 func (s *Server) handleExtendLifetime(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
 	if !ok {
 		return
 	}
-	if sb.DestroyedAt != nil {
-		writeErr(w, http.StatusConflict, "this sandbox is already destroyed and cannot be extended")
+	if sb.DestroyedAt != nil || sb.Status == db.StatusExpired || (!sb.ExpiresAt.IsZero() && time.Now().After(sb.ExpiresAt)) {
+		writeErr(w, http.StatusConflict, "this sandbox has expired and cannot be extended")
 		return
 	}
 	var req extendLifetimeRequest
@@ -135,7 +138,7 @@ func (s *Server) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 // handleRedeploy triggers a manual rebuild (used after edits are saved and by
 // the "redeploy" button). Runs in the background.
 func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
@@ -155,7 +158,7 @@ func (s *Server) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateBranch(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
@@ -180,7 +183,7 @@ func (s *Server) handleUpdateBranch(w http.ResponseWriter, r *http.Request) {
 // handleSandboxWarnings returns the lifetime-warning state for a sandbox so
 // the frontend can render banners on list and detail views (section 2a req 3).
 func (s *Server) handleSandboxWarnings(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -328,7 +331,7 @@ type SandboxLogsResponse struct {
 
 // handleGetSandboxLogs provides a state-aware REST endpoint for container output.
 func (s *Server) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request) {
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
 	if !ok {
 		return
 	}
@@ -411,5 +414,266 @@ func (s *Server) handleGetSandboxLogs(w http.ResponseWriter, r *http.Request) {
 		Status:    string(sb.Status),
 		Available: false,
 		Message:   fmt.Sprintf("Sandbox is in %s state.", sb.Status),
+	})
+}
+
+// handleReportActivity allows authorized project members to bump activity
+// (e.g., clicking "I'm still here", interaction in in-browser IDE or preview).
+func (s *Server) handleReportActivity(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
+	if !ok {
+		return
+	}
+	if sb.DestroyedAt != nil || sb.Status == db.StatusExpired || sb.Status == db.StatusDeleted {
+		writeErr(w, http.StatusConflict, "sandbox has expired or is deleted")
+		return
+	}
+	s.touchSandbox(r.Context(), sb, user.ID)
+	ttl := s.cache.GetIdleTTL(r.Context(), sb.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                     true,
+		"status":                 sb.Status,
+		"user_id":                user.ID,
+		"idle_ttl_remaining_sec": int64(ttl.Seconds()),
+		"in_hibernation_warning": s.cache.HasHibernationWarning(r.Context(), sb.ID),
+		"in_grace_period":        s.cache.InGracePeriod(r.Context(), sb.ID),
+	})
+}
+
+// handleLifecycleStatus provides real-time lifecycle tracking across all members.
+func (s *Server) handleLifecycleStatus(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.requireSandboxRole(w, r, db.ProjectMemberRoleViewer)
+	if !ok {
+		return
+	}
+	ttl := s.cache.GetIdleTTL(r.Context(), sb.ID)
+	activeOp, hasOp := s.cache.GetActiveOperation(r.Context(), sb.ID)
+	inWarning := s.cache.HasHibernationWarning(r.Context(), sb.ID)
+	inGrace := s.cache.InGracePeriod(r.Context(), sb.ID)
+	hasUserActivity := s.cache.HasActiveUserActivity(r.Context(), sb.ID)
+
+	retentionDur := time.Duration(sb.WorkspaceRetentionSeconds) * time.Second
+	if retentionDur <= 0 {
+		retentionDur = 7 * 24 * time.Hour
+	}
+
+	var expirationRemainingSec *int64
+	var expiresAtVal *time.Time
+	expirationCountdownText := "Not applicable"
+
+	if sb.Status == db.StatusHibernated && !sb.ExpiresAt.IsZero() && sb.ExpiresAt.After(time.Unix(0, 0)) {
+		rem := int64(time.Until(sb.ExpiresAt).Seconds())
+		expirationRemainingSec = &rem
+		expiresAtVal = &sb.ExpiresAt
+		if rem <= 0 {
+			expirationCountdownText = "Expired"
+		} else {
+			hours := rem / 3600
+			mins := (rem % 3600) / 60
+			secs := rem % 60
+			expirationCountdownText = fmt.Sprintf("%02d:%02d:%02d", hours, mins, secs)
+		}
+	} else if sb.Status == db.StatusExpired {
+		expirationCountdownText = "Expired"
+	}
+
+	var retentionExpiresAt time.Time
+	if sb.DestroyedAt != nil {
+		retentionExpiresAt = sb.DestroyedAt.Add(retentionDur)
+	} else if sb.Status == db.StatusHibernated && expiresAtVal != nil {
+		retentionExpiresAt = expiresAtVal.Add(retentionDur)
+	} else {
+		retentionExpiresAt = time.Now().Add(retentionDur)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sandbox_id":                    sb.ID,
+		"status":                        sb.Status,
+		"lifecycle_version":             sb.LifecycleVersion,
+		"idle_timeout_seconds":          sb.IdleTimeoutSeconds,
+		"idle_ttl_remaining_sec":        int64(ttl.Seconds()),
+		"has_active_user_activity":      hasUserActivity,
+		"in_hibernation_warning":        inWarning,
+		"in_grace_period":               inGrace,
+		"active_operation":              activeOp,
+		"has_active_operation":          hasOp,
+		"hibernated_at":                 sb.HibernatedAt,
+		"hibernated_expiration_seconds": sb.HibernatedExpirationSeconds,
+		"workspace_retention_seconds":   sb.WorkspaceRetentionSeconds,
+		"expiration_active":             sb.Status == db.StatusHibernated,
+		"expires_at":                    expiresAtVal,
+		"expiration_remaining_sec":      expirationRemainingSec,
+		"expiration_countdown_text":     expirationCountdownText,
+		"workspace_preserved":           true,
+		"retention_expires_at":          retentionExpiresAt,
+	})
+}
+
+type updateSettingsRequest struct {
+	IdleTimeoutSeconds          *int    `json:"idleTimeoutSeconds"`
+	HibernatedExpirationSeconds *int64  `json:"hibernatedExpirationSeconds"`
+	WorkspaceRetentionSeconds   *int64  `json:"workspaceRetentionSeconds"`
+	LifetimeSeconds             *int64  `json:"lifetimeSeconds"`
+	StartCommand                *string `json:"startCommand"`
+	Port                        *int    `json:"port"`
+	HealthCheckType             *string `json:"healthCheckType"`
+}
+
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.requireOwnedSandbox(w, r)
+	if !ok {
+		return
+	}
+	var req updateSettingsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	idleSec := sb.IdleTimeoutSeconds
+	if req.IdleTimeoutSeconds != nil && *req.IdleTimeoutSeconds > 0 {
+		idleSec = *req.IdleTimeoutSeconds
+	}
+
+	hibExpSec := sb.HibernatedExpirationSeconds
+	if req.HibernatedExpirationSeconds != nil && *req.HibernatedExpirationSeconds > 0 {
+		hibExpSec = *req.HibernatedExpirationSeconds
+	}
+
+	retentionSec := sb.WorkspaceRetentionSeconds
+	if req.WorkspaceRetentionSeconds != nil && *req.WorkspaceRetentionSeconds > 0 {
+		retentionSec = *req.WorkspaceRetentionSeconds
+	}
+
+	if err := s.store.UpdateLifecycleConfig(sb.ID, idleSec, hibExpSec, retentionSec); err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not update lifecycle config")
+		return
+	}
+
+	updated, _ := s.store.GetSandbox(sb.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Lifecycle settings updated successfully",
+		"sandbox": s.sandboxJSON(updated),
+	})
+}
+
+type startOperationRequest struct {
+	Type               string `json:"type"`
+	MaxDurationSeconds int64  `json:"max_duration_seconds"`
+}
+
+func (s *Server) handleStartOperation(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
+	if !ok {
+		return
+	}
+	if sb.DestroyedAt != nil || sb.Status == db.StatusExpired {
+		writeErr(w, http.StatusConflict, "sandbox has expired")
+		return
+	}
+	var req startOperationRequest
+	if err := decodeJSON(r, &req); err != nil || req.Type == "" {
+		writeErr(w, http.StatusBadRequest, "operation type is required")
+		return
+	}
+	dur := time.Duration(req.MaxDurationSeconds) * time.Second
+	if dur <= 0 || dur > 30*time.Minute {
+		dur = 15 * time.Minute // bounded 15-minute max
+	}
+	if err := s.cache.StartOperation(r.Context(), sb.ID, req.Type, user.ID, dur); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.logger.Info("lifecycle: active operation started",
+		slog.String("sandbox", sb.ID),
+		slog.String("op_type", req.Type),
+		slog.String("user_id", user.ID))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                   true,
+		"operation":            req.Type,
+		"max_duration_seconds": int64(dur.Seconds()),
+	})
+}
+
+func (s *Server) handleEndOperation(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
+	if !ok {
+		return
+	}
+	_ = s.cache.EndOperation(r.Context(), sb.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleRestoreExpiredSandbox creates a NEW sandbox from the preserved workspace
+// files of an expired sandbox. The expired runtime is NEVER revived.
+func (s *Server) handleRestoreExpiredSandbox(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sb, ok := s.requireOwnedSandbox(w, r)
+	if !ok {
+		return
+	}
+	if sb.Status != db.StatusExpired && sb.Status != db.StatusDeleted && sb.DestroyedAt == nil {
+		writeErr(w, http.StatusBadRequest, "only expired sandboxes can be restored to a new instance")
+		return
+	}
+	srcDir := filepath.Join(s.cfg.SandboxWorkDir, sb.Subdomain)
+	if _, err := os.Stat(srcDir); err != nil {
+		writeErr(w, http.StatusGone, "preserved workspace data has exceeded retention and is no longer available")
+		return
+	}
+
+	now := time.Now().UTC()
+	newID := uuid.NewString()
+	newSubdomain := fmt.Sprintf("%s-restored-%s", sb.Subdomain, newID[:6])
+	if len(newSubdomain) > 50 {
+		newSubdomain = newSubdomain[:50]
+	}
+
+	newSb := &db.Sandbox{
+		ID:                 newID,
+		RepositoryID:       sb.RepositoryID,
+		ParentSandboxID:    &sb.ID,
+		BranchName:         sb.BranchName,
+		Subdomain:          newSubdomain,
+		Status:             db.StatusQueued,
+		IdleTimeoutSeconds: sb.IdleTimeoutSeconds,
+		LifetimeSeconds:    sb.LifetimeSeconds,
+		ExpiresAt:          now.Add(time.Duration(sb.LifetimeSeconds) * time.Second),
+		CreatedAt:          now,
+		BuildConfig:        sb.BuildConfig,
+	}
+
+	if err := s.store.CreateSandbox(newSb); err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not create restored sandbox")
+		return
+	}
+
+	destDir := filepath.Join(s.cfg.SandboxWorkDir, newSubdomain)
+	_ = copyDir(srcDir, destDir)
+
+	s.logger.Info("lifecycle: created new sandbox instance from preserved workspace",
+		slog.String("expired_sandbox", sb.ID),
+		slog.String("new_sandbox", newID),
+		slog.String("user_id", user.ID))
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"message":     "New sandbox instance created from preserved workspace data",
+		"sandbox":     s.sandboxJSON(newSb),
+		"original_id": sb.ID,
+		"new_id":      newID,
 	})
 }

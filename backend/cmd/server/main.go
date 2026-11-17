@@ -73,6 +73,12 @@ func run() error {
 	}
 	defer orch.Close()
 
+	if cleaned, err := orch.ReconcileOrphanContainers(ctx); err != nil {
+		logger.Warn("orchestrator: reconciling orphan containers from previous run", slog.String("err", err.Error()))
+	} else if cleaned > 0 {
+		logger.Info("orchestrator: reconciled orphan containers from previous run", slog.Int("count", cleaned))
+	}
+
 	deployer := orchestrator.NewDeployer(cfg, store, orch, box, redis)
 	if recovered, err := deployer.RecoverStuckBuilds(ctx); err != nil {
 		logger.Warn("deployer: recovering stuck builds from previous run", slog.String("err", err.Error()))

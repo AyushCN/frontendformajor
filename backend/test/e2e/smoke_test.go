@@ -24,6 +24,7 @@ import (
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
 	"github.com/api-sandbox-links/backend/internal/proxy"
 	"github.com/api-sandbox-links/backend/internal/secret"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -301,6 +302,15 @@ func TestSmokeDeployNodeJSSample(t *testing.T) {
 		excerpt := ""
 		if deps, listErr := env.store.ListDeployments(sandbox.ID); listErr == nil && len(deps) > 0 {
 			excerpt = deps[0].LogExcerpt
+		}
+		if containers, cErr := env.orch.FindContainersBySandbox(context.Background(), sandbox.ID); cErr == nil && len(containers) > 0 {
+			for _, c := range containers {
+				if logReader, lErr := env.docker.ContainerLogs(context.Background(), c.ID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: "100"}); lErr == nil {
+					logBytes, _ := io.ReadAll(logReader)
+					logReader.Close()
+					t.Logf("=== Container %s (%v) Logs ===\n%s", c.ID[:12], c.Names, string(logBytes))
+				}
+			}
 		}
 		t.Fatalf("DeploySandbox failed: %v\nDeployment Log Excerpt:\n%s", err, excerpt)
 	}

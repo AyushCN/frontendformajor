@@ -236,4 +236,3 @@ func detectRailpackPort(provider string, variables map[string]string) int {
 	}
 	return ProviderDefaultPort(provider)
 }
-

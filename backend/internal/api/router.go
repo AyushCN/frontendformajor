@@ -126,7 +126,7 @@ func (s *Server) locks() *workspacelock.Manager {
 // New assembles the Server with its ready-to-use dependencies.
 func New(
 	cfg *config.Config,
-	store *db.Store,
+	store Store,
 	cache *cache.Redis,
 	orch *orchestrator.Orchestrator,
 	deployer *orchestrator.Deployer,
@@ -134,7 +134,14 @@ func New(
 	aiClient *ai.Client,
 	logger *slog.Logger,
 ) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var gw *proxy.Gateway
+	if dbStore, ok := store.(*db.Store); ok {
+		gw = proxy.NewGateway(dbStore, cache, orch, cfg, logger)
+	}
 	return &Server{
 		cfg:            cfg,
 		store:          store,
@@ -144,7 +151,7 @@ func New(
 		box:            box,
 		ai:             aiClient,
 		logger:         logger,
-		gateway:        proxy.NewGateway(store, cache, orch, cfg, logger),
+		gateway:        gw,
 		workspaceLocks: workspacelock.NewManager(),
 		bgCtx:          bgCtx,
 		bgCancel:       bgCancel,
@@ -214,6 +221,8 @@ func (s *Server) Router() http.Handler {
 	// Public auth endpoints.
 	r.Get("/api/auth/github", s.handleAuthStart)
 	r.Get("/api/auth/github/callback", s.handleAuthCallback)
+	r.Post("/api/auth/dev-login", s.handleDevLogin)
+	r.Get("/api/auth/dev-login", s.handleDevLogin)
 
 	// Logout is deliberately not behind requireUser. Its whole job is to clear
 	// the session cookie, so requiring a valid session to reach it means a
@@ -225,6 +234,42 @@ func (s *Server) Router() http.Handler {
 	r.Group(func(protected chi.Router) {
 		protected.Use(s.requireUser)
 		protected.Get("/api/me", s.handleMe)
+		protected.Get("/api/users/search", s.handleSearchUsers)
+
+		protected.Route("/api/projects", func(pr chi.Router) {
+			pr.Get("/", s.handleListProjects)
+			pr.Post("/", s.handleCreateProject)
+			pr.Get("/{id}", s.handleGetProject)
+			pr.Put("/{id}", s.handleUpdateProject)
+			pr.Patch("/{id}", s.handleUpdateProject)
+			pr.Delete("/{id}", s.handleDeleteProject)
+			pr.Post("/{id}/transfer", s.handleTransferProjectOwnership)
+
+			pr.Get("/{id}/members", s.handleListProjectMembers)
+			pr.Patch("/{id}/members/{userId}", s.handleUpdateMemberRole)
+			pr.Delete("/{id}/members/{userId}", s.handleRemoveProjectMember)
+
+			pr.Get("/{id}/invitations", s.handleListProjectInvitations)
+			pr.Post("/{id}/invitations", s.handleCreateProjectInvitation)
+
+			pr.Get("/{id}/repositories", s.handleListProjectRepositories)
+			pr.Post("/{id}/repositories", s.handleAddProjectRepository)
+			pr.Delete("/{id}/repositories/{repoId}", s.handleRemoveProjectRepository)
+
+			pr.Get("/{id}/sandboxes", s.handleListProjectSandboxes)
+			pr.Post("/{id}/sandboxes", s.handleAssociateProjectSandbox)
+			pr.Delete("/{id}/sandboxes/{sandboxId}", s.handleDisassociateProjectSandbox)
+
+			pr.Get("/{id}/activity", s.handleListProjectActivity)
+		})
+
+		protected.Route("/api/invitations", func(ir chi.Router) {
+			ir.Get("/", s.handleListUserInvitations)
+			ir.Post("/{id}/accept", s.handleAcceptInvitation)
+			ir.Post("/{id}/reject", s.handleRejectInvitation)
+			ir.Post("/{id}/revoke", s.handleRevokeInvitation)
+			ir.Post("/{id}/resend", s.handleResendInvitation)
+		})
 
 		protected.Route("/api/sandboxes", func(pr chi.Router) {
 			pr.Get("/", s.handleListSandboxes)
@@ -240,11 +285,19 @@ func (s *Server) Router() http.Handler {
 			pr.Post("/{id}/branch", s.handleUpdateBranch)
 			pr.Get("/{id}/warnings", s.handleSandboxWarnings)
 			pr.Get("/{id}/stats/history", s.handleStatsHistory)
+			pr.Post("/{id}/activity", s.handleReportActivity)
+			pr.Get("/{id}/lifecycle/status", s.handleLifecycleStatus)
+			pr.Post("/{id}/operations/start", s.handleStartOperation)
+			pr.Post("/{id}/operations/end", s.handleEndOperation)
+			pr.Post("/{id}/restore", s.handleRestoreExpiredSandbox)
+			pr.Put("/{id}/settings", s.handleUpdateSettings)
+			pr.Patch("/{id}/settings", s.handleUpdateSettings)
 
 			// Phase F/G: in-browser editor + git push.
 			pr.Get("/{id}/files", s.handleFileTree)
 			pr.Get("/{id}/file", s.handleFileContent)
 			pr.Put("/{id}/file", s.handleSaveFile)
+			pr.Post("/{id}/file", s.handleSaveFile)
 			pr.Post("/{id}/commit", s.handleCommitPush)
 		})
 

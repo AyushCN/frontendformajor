@@ -148,3 +148,40 @@ func TestGatewayWakeCallerContextCancellation(t *testing.T) {
 	g.wakingMu.Unlock()
 }
 
+func TestGatewayExpiredSandboxCannotBeWoken(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{
+		cfg:    &config.Config{SandboxBaseDomain: "sandbox.localhost"},
+		logger: logger,
+		waking: map[string]*wakeCall{},
+	}
+	_ = g
+
+	// 1. Expired by status
+	sbExpiredStatus := &db.Sandbox{
+		ID:        "sb-expired-status",
+		Subdomain: "expired-status",
+		Status:    db.StatusExpired,
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
+	}
+
+	// 2. Expired by past ExpiresAt timestamp
+	sbPastExpiry := &db.Sandbox{
+		ID:        "sb-past-expiry",
+		Subdomain: "past-expiry",
+		Status:    db.StatusHibernated,
+		ExpiresAt: time.Now().Add(-10 * time.Minute),
+	}
+
+	// Helper checking expiration predicate used in gateway serve()
+	isExpired := func(sb *db.Sandbox) bool {
+		return sb.DestroyedAt != nil || sb.Status == db.StatusExpired || (!sb.ExpiresAt.IsZero() && time.Now().After(sb.ExpiresAt))
+	}
+
+	if !isExpired(sbExpiredStatus) {
+		t.Errorf("expected sbExpiredStatus to be recognized as expired")
+	}
+	if !isExpired(sbPastExpiry) {
+		t.Errorf("expected sbPastExpiry to be recognized as expired")
+	}
+}

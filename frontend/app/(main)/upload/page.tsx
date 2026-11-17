@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -24,7 +24,7 @@ const schema = z.object({
 
 type FormData = z.infer<typeof schema>;
 
-export default function UploadPage() {
+function UploadForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryProjectId = searchParams.get("projectId");
@@ -298,5 +298,19 @@ export default function UploadPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function UploadPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-[400px]">
+          <Loader2 className="w-8 h-8 animate-spin text-primary-fixed" />
+        </div>
+      }
+    >
+      <UploadForm />
+    </Suspense>
   );
 }

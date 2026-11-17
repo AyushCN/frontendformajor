@@ -52,7 +52,7 @@ func (r *BuildConfigResolver) Resolve(ctx context.Context, builder Builder, work
 
 	var (
 		dockerfilePath = ""
-		preserveCmd    = false
+		preserveCmd    = true // By default preserve the builder image's compiled CMD/ENTRYPOINT
 		startCmd       = ""
 		buildCmd       = ""
 		installCmd     = ""
@@ -68,7 +68,7 @@ func (r *BuildConfigResolver) Resolve(ctx context.Context, builder Builder, work
 		variables[k] = v
 	}
 
-	// 1. Dockerfile-specific path resolution and CMD preservation
+	// 1. Dockerfile-specific path resolution
 	if builder.Name() == "dockerfile" {
 		if userCfg != nil && userCfg.DockerfilePath != "" {
 			df, err := resolveDockerfilePath(effectiveDir, userCfg.DockerfilePath)
@@ -80,8 +80,6 @@ func (r *BuildConfigResolver) Resolve(ctx context.Context, builder Builder, work
 			df, _ := findDockerfile(effectiveDir)
 			dockerfilePath = df
 		}
-		// Dockerfile CMD/ENTRYPOINT is preserved by default unless the user explicitly overrides StartCmd
-		preserveCmd = true
 		startCmd = plan.StartCmd
 	}
 
@@ -193,4 +191,3 @@ func readRailpackJSONStart(dir string) string {
 	}
 	return ""
 }
-

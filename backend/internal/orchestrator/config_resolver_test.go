@@ -173,4 +173,3 @@ CMD ["python", "app.py"]
 		}
 	})
 }
-

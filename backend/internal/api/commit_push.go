@@ -32,11 +32,11 @@ func (s *Server) handleCommitPush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "not signed in")
 		return
 	}
-	sb, ok := s.requireOwnedSandbox(w, r)
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
 	if !ok {
 		return
 	}
-	s.touchSandbox(r.Context(), sb)
+	s.touchSandbox(r.Context(), sb, user.ID)
 	if sb.DestroyedAt != nil || sb.Status == db.StatusDeleted || sb.Status == db.StatusExpired {
 		writeErr(w, http.StatusConflict, "sandbox is destroyed; nothing to commit")
 		return

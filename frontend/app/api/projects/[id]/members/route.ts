@@ -1,25 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProjectById } from "@/lib/projects-store";
 
 export async function GET(
   req: NextRequest,
   props: { params: Promise<{ id: string }> }
 ) {
   const { id } = await props.params;
-  const project = getProjectById(id);
-  const collabs = (project?.collaborators && project.collaborators.length > 0)
-    ? project.collaborators
-    : [
-        {
-          id: "m-owner",
-          userId: "user-ayushcn",
-          role: "OWNER",
-          status: "ACTIVE",
-          user: {
-            username: "AyushCN",
-            email: "ayush@api-sandbox.local",
-          },
-        },
-      ];
-  return NextResponse.json(collabs);
+  const backend = process.env.BACKEND_URL || "http://localhost:8080";
+  const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
+  const headers: Record<string, string> = {};
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
+
+  try {
+    const res = await fetch(`${backend}/api/projects/${id}/members`, {
+      headers,
+      cache: "no-store",
+    });
+    const data = await res.json().catch(() => ([]));
+    return NextResponse.json(data, { status: res.status });
+  } catch (err: unknown) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+  }
 }

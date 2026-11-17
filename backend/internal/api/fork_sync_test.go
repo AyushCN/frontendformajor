@@ -63,6 +63,14 @@ func (s *forkSyncStore) OwnsSandbox(sandboxID, userID string) (bool, error) {
 	return repo.UserID == userID, nil
 }
 
+func (s *forkSyncStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMemberRole, error) {
+	owns, err := s.OwnsSandbox(sandboxID, userID)
+	if err == nil && owns {
+		return db.ProjectMemberRoleOwner, nil
+	}
+	return "", errors.New("not authorized")
+}
+
 func (s *forkSyncStore) GetSandbox(id string) (*db.Sandbox, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

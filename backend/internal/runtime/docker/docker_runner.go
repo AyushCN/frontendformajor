@@ -34,10 +34,10 @@ func (d *DockerRunner) Create(ctx context.Context, spec runtime.ContainerSpec) (
 	}
 
 	cc := &container.Config{
-		Image:        spec.Image,
-		Cmd:          spec.Command,
-		Env:          spec.Env,
-		Labels:       spec.Labels,
+		Image:           spec.Image,
+		Cmd:             spec.Command,
+		Env:             spec.Env,
+		Labels:          spec.Labels,
 		NetworkDisabled: spec.NetworkDisabled,
 	}
 
@@ -57,14 +57,14 @@ func (d *DockerRunner) Create(ctx context.Context, spec runtime.ContainerSpec) (
 
 	initVal := spec.Init
 	hc := &container.HostConfig{
-		Init:            &initVal,
-		ReadonlyRootfs:  spec.ReadonlyRootfs,
-		Runtime:         spec.Runtime,
-		Mounts:          mounts,
-		Tmpfs:           spec.Tmpfs,
-		CapDrop:         spec.CapDrop,
-		CapAdd:          spec.CapAdd,
-		SecurityOpt:     []string{"no-new-privileges:true"},
+		Init:           &initVal,
+		ReadonlyRootfs: spec.ReadonlyRootfs,
+		Runtime:        spec.Runtime,
+		Mounts:         mounts,
+		Tmpfs:          spec.Tmpfs,
+		CapDrop:        spec.CapDrop,
+		CapAdd:         spec.CapAdd,
+		SecurityOpt:    []string{"no-new-privileges:true"},
 		Resources: container.Resources{
 			NanoCPUs:   int64(spec.CPUs * 1e9),
 			Memory:     spec.MemoryBytes,

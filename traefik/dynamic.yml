@@ -17,7 +17,7 @@
 http:
   routers:
     sandbox-edge:
-      rule: "HostRegexp(`^[a-z0-9-]+\\.sandbox\\.localhost$`)"
+      rule: "HostRegexp(`{subdomain:[a-z0-9-]+}.{domain:.+}`)"
       entrypoints:
         - web
       service: sandbox-gateway

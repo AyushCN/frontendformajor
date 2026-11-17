@@ -10,21 +10,33 @@ import (
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
 )
 
+// ExpiryStore defines database queries needed by the expiry reaper.
+type ExpiryStore interface {
+	ListDuedExpiredSandboxes(now time.Time) ([]*db.Sandbox, error)
+	ExpireHibernatedSandbox(id string, lifecycleVersion int64, now time.Time) (bool, error)
+}
+
+// ExpiryOrchestrator defines the runtime teardown operations needed by the expiry reaper.
+type ExpiryOrchestrator interface {
+	TeardownSandbox(ctx context.Context, sb *db.Sandbox) error
+	SweepSandboxContainers(ctx context.Context, sandboxID string) error
+}
+
 // ExpiryReaper enforces the irreversible half of the timer story: when a
 // sandbox's expires_at passes, it is torn down completely — app container,
 // sidecar DB containers, their data volumes, the private network — and its row
 // is left as a tombstone (status 'expired', destroyed_at set) so the user can
 // still see it and recreate it. It shares NO code with IdleReaper by design.
 type ExpiryReaper struct {
-	store    *db.Store
-	orch     *orchestrator.Orchestrator
+	store    ExpiryStore
+	orch     ExpiryOrchestrator
 	cfg      *config.Config
 	logger   *slog.Logger
 	interval time.Duration
 }
 
 // NewExpiryReaper constructs the destroyer worker.
-func NewExpiryReaper(store *db.Store, orch *orchestrator.Orchestrator, cfg *config.Config, logger *slog.Logger, interval time.Duration) *ExpiryReaper {
+func NewExpiryReaper(store ExpiryStore, orch ExpiryOrchestrator, cfg *config.Config, logger *slog.Logger, interval time.Duration) *ExpiryReaper {
 	return &ExpiryReaper{store: store, orch: orch, cfg: cfg, logger: logger, interval: interval}
 }
 
@@ -51,48 +63,54 @@ func (r *ExpiryReaper) tick(ctx context.Context) {
 		return
 	}
 	for _, sb := range due {
-		// Tear down by label even when container_id is empty: a deploy that
-		// failed before recording the container can still leave a sidecar,
-		// volume, network, or image behind. The nil guard keeps the reaper
-		// testable with a nil orchestrator; production always has one.
+		now := time.Now().UTC()
+
+		// Requirement 8: Do not mark a sandbox as cleaned until runtime cleanup is confirmed.
+		// First perform container, sidecar volume, and network teardown.
 		if r.orch != nil {
 			if err := r.orch.TeardownSandbox(ctx, sb); err != nil {
-				r.logger.Warn("expiry-reaper: teardown failed (will retry next tick)",
+				r.logger.Warn("expiry-reaper: runtime teardown failed; will retry cleanup on next tick",
 					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
-				continue
+				continue // DO NOT mark expired; retry on next tick
 			}
 		}
-		// Remove the on-disk working copy too: destruction is meant to be
-		// total. Validated: an empty subdomain would otherwise resolve to
-		// the work ROOT and delete every sandbox's files, and a subdomain
-		// with separators/.. could escape the root entirely.
-		if err := orchestrator.RemoveSandboxWorkDir(r.cfg.SandboxWorkDir, sb.Subdomain); err != nil {
-			r.logger.Warn("expiry-reaper: removing work dir",
-				slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
-		}
 
-		now := time.Now()
-		if err := r.store.UpdateSandbox(sb.ID, map[string]any{
-			"status":             string(db.StatusExpired),
-			"destroyed_at":       now,
-			"destruction_reason": string(db.DestroyLifetimeExpired),
-			"container_id":       "",
-			"image_tag":          "",
-		}); err != nil {
-			r.logger.Warn("expiry-reaper: marking sandbox expired",
-				slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+		// Fencing Token & Authoritative Expiration Commit:
+		// Atomically transition from HIBERNATED -> EXPIRED only if lifecycle_version matches
+		// and the sandbox is still hibernated with expired deadline.
+		expiredOk, err := r.store.ExpireHibernatedSandbox(sb.ID, sb.LifecycleVersion, now)
+		if err != nil {
+			r.logger.Warn("expiry-reaper: checking expiration validity in database", slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
 			continue
 		}
-		// Tombstone committed: sweep for containers a racing deploy created
-		// between the teardown above and this write (same contract as the
-		// manual destroy path).
+		if !expiredOk {
+			r.logger.Info("expiry-reaper: sandbox woke up or lifecycle version changed; stale expiration aborted",
+				slog.String("sandbox", sb.ID),
+				slog.Int64("fenced_version", sb.LifecycleVersion))
+			continue
+		}
+
+		// Data Preservation: Separate runtime lifecycle from workspace data retention.
+		// On-disk workspace data is preserved for the configured retention period post-expiration.
+		retentionPeriod := time.Duration(sb.WorkspaceRetentionSeconds) * time.Second
+		if retentionPeriod <= 0 {
+			retentionPeriod = 7 * 24 * time.Hour // default 7 days
+		}
+		if sb.DestroyedAt != nil && time.Since(*sb.DestroyedAt) > retentionPeriod {
+			if err := orchestrator.RemoveSandboxWorkDir(r.cfg.SandboxWorkDir, sb.Subdomain); err != nil {
+				r.logger.Warn("expiry-reaper: removing retention-expired work dir",
+					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+			}
+		}
+
+		// Sweep for lingering containers
 		if r.orch != nil {
 			if err := r.orch.SweepSandboxContainers(ctx, sb.ID); err != nil {
 				r.logger.Warn("expiry-reaper: post-tombstone container sweep",
 					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
 			}
 		}
-		r.logger.Info("expiry-reaper: destroyed sandbox",
+		r.logger.Info("expiry-reaper: expired runtime container successfully torn down (workspace preserved)",
 			slog.String("sandbox", sb.ID), slog.String("subdomain", sb.Subdomain))
 	}
 }

@@ -12,7 +12,7 @@ import (
 // expiry at which a warning should fire. Labels are also the dedupe key in
 // the sandbox_lifetime_warnings table, so each tier is sent at most once.
 type warningTier struct {
-	label string
+	label   string
 	seconds float64
 }
 

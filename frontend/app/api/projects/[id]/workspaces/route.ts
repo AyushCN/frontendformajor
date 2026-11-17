@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { filterSandboxesForProject } from "@/lib/projects-store";
 
 export async function GET(
   req: NextRequest,
@@ -8,17 +7,21 @@ export async function GET(
   const { id } = await props.params;
   const backend = process.env.BACKEND_URL || "http://localhost:8080";
   const cookie = req.headers.get("cookie") || "";
+  const authHeader = req.headers.get("authorization") || "";
+
+  const headers: Record<string, string> = {};
+  if (cookie) headers["cookie"] = cookie;
+  if (authHeader) headers["authorization"] = authHeader;
 
   try {
-    const res = await fetch(`${backend}/api/sandboxes`, {
-      headers: { cookie },
+    const res = await fetch(`${backend}/api/projects/${id}/sandboxes`, {
+      headers,
       cache: "no-store",
     });
 
     if (res.ok) {
       const data = await res.json();
-      const allSandboxes = Array.isArray(data) ? data : data?.sandboxes || [];
-      const projectSandboxes = filterSandboxesForProject(id, allSandboxes);
+      const projectSandboxes = Array.isArray(data) ? data : data?.sandboxes || [];
 
       const workspaces = projectSandboxes.map((sb: any) => ({
         id: `ws-${sb.id}`,

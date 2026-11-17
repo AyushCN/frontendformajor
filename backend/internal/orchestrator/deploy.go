@@ -388,7 +388,7 @@ func (d *Deployer) DeploySandbox(ctx context.Context, sandbox *db.Sandbox, opts 
 	// The nixpacks-detected port can be wrong when an app hardcodes its own
 	// port instead of honoring PORT. Discover the real listening port so the
 	// gateway routes to the right container port.
-	discovered, err := d.orch.DiscoverPort(deployCtx, result.IPAddress, result.Port, 90*time.Second)
+	discovered, err := d.orch.DiscoverPort(deployCtx, result.IPAddress, result.Port, 90*time.Second, result.ContainerID)
 	if err != nil {
 		return markFailed(fmt.Errorf("deploy: app not reachable on any known port: %w", err))
 	}
