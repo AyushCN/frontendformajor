@@ -14,6 +14,9 @@ const (
 	CategoryNodeJS          ProjectCategory = "NODEJS"
 	CategoryGolang          ProjectCategory = "GOLANG"
 	CategoryJava            ProjectCategory = "JAVA"
+	CategoryC               ProjectCategory = "C"
+	CategoryCpp             ProjectCategory = "CPP"
+	CategoryRust            ProjectCategory = "RUST"
 	CategoryUnknown         ProjectCategory = "UNKNOWN"
 )
 

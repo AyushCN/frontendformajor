@@ -242,6 +242,15 @@ func (a *RepositoryAnalyzer) InspectRepository(ctx context.Context, repoDir stri
 	} else if analysis.PrimaryLanguage == "java" {
 		analysis.Category = CategoryJava
 		analysis.CategoryConfidence = ConfidenceHigh
+	} else if analysis.PrimaryLanguage == "c" {
+		analysis.Category = CategoryC
+		analysis.CategoryConfidence = ConfidenceHigh
+	} else if analysis.PrimaryLanguage == "cpp" {
+		analysis.Category = CategoryCpp
+		analysis.CategoryConfidence = ConfidenceHigh
+	} else if analysis.PrimaryLanguage == "rust" {
+		analysis.Category = CategoryRust
+		analysis.CategoryConfidence = ConfidenceHigh
 	} else {
 		analysis.Category = CategoryUnknown
 		analysis.CategoryConfidence = ConfidenceLow
@@ -329,14 +338,23 @@ func (a *RepositoryAnalyzer) determinePrimaryLanguage(tally map[string]int, clea
 		if fileExistsWithExt(cleanRoot, ".java") {
 			return "java"
 		}
+		if fileExistsWithExt(cleanRoot, ".c") {
+			return "c"
+		}
+		if fileExistsWithExt(cleanRoot, ".cpp", ".cc", ".cxx", ".C") {
+			return "cpp"
+		}
+		if fileExistsWithExt(cleanRoot, ".rs") {
+			return "rust"
+		}
 		return "unknown"
 	}
 
 	bestLang := "unknown"
 	bestCount := -1
 
-	// Explicit language priority if counts match: python > nodejs > golang > java
-	order := []string{"python", "nodejs", "golang", "java"}
+	// Explicit language priority if counts match: python > nodejs > golang > java > cpp > c > rust
+	order := []string{"python", "nodejs", "golang", "java", "cpp", "c", "rust"}
 	for _, lang := range order {
 		count := tally[lang]
 		if count > bestCount {

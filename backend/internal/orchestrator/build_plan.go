@@ -245,6 +245,9 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 			startCmd = procStart
 		} else if entryPointRes != nil && entryPointRes.SelectedCommand != "" {
 			startCmd = entryPointRes.SelectedCommand
+			if entryPointRes.BuildCommand != "" {
+				buildCmd = entryPointRes.BuildCommand
+			}
 			preserveEntrypoint = false
 		}
 	}

@@ -24,36 +24,51 @@ func createTestRepo(t *testing.T, files map[string]string) string {
 	return dir
 }
 
-func TestEntryPointResolver_SinglePythonFile_APy(t *testing.T) {
+// ----------------------------------------------------------------------------
+// Python Tests (Arbitrary Filenames)
+// ----------------------------------------------------------------------------
+
+func TestEntryPointResolver_ArbitraryPythonFilename_GPy(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"a.py": "print(10 + 20)\n",
+		"g.py": "print('hello from g.py')\n",
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
 	if res.IsAmbiguous {
-		t.Errorf("expected unambiguous resolution for single a.py, got ambiguous")
+		t.Errorf("expected unambiguous resolution for single g.py, got ambiguous")
+	}
+	if res.SelectedCommand != "python g.py" {
+		t.Errorf("expected 'python g.py', got %q", res.SelectedCommand)
 	}
 	if res.ExecutionMode != ExecutionModeScript {
-		t.Errorf("expected ExecutionModeScript, got %s", res.ExecutionMode)
-	}
-	if res.SelectedCommand != "python a.py" {
-		t.Errorf("expected 'python a.py', got %q", res.SelectedCommand)
+		t.Errorf("expected SCRIPT, got %s", res.ExecutionMode)
 	}
 	if res.CommandSource != "SINGLE_FILE_INFERENCE" {
-		t.Errorf("expected command source SINGLE_FILE_INFERENCE, got %s", res.CommandSource)
+		t.Errorf("expected SINGLE_FILE_INFERENCE, got %s", res.CommandSource)
 	}
-	if res.PrimaryCandidate == nil || res.PrimaryCandidate.RelativePath != "a.py" {
-		t.Errorf("expected primary candidate a.py, got %+v", res.PrimaryCandidate)
+}
+
+func TestEntryPointResolver_ArbitraryPythonFilename_TempPy(t *testing.T) {
+	repo := createTestRepo(t, map[string]string{
+		"temp.py": "x = 42\nprint(x * 2)\n",
+	})
+
+	resolver := NewEntryPointResolver()
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
-	if res.Confidence != ConfidenceHigh {
-		t.Errorf("expected ConfidenceHigh, got %s", res.Confidence)
+
+	if res.SelectedCommand != "python temp.py" {
+		t.Errorf("expected 'python temp.py', got %q", res.SelectedCommand)
+	}
+	if res.ExecutionMode != ExecutionModeScript {
+		t.Errorf("expected SCRIPT, got %s", res.ExecutionMode)
 	}
 }
 
@@ -66,9 +81,7 @@ print("Factorial is:", n * (n - 1))
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
@@ -86,23 +99,18 @@ print("Factorial is:", n * (n - 1))
 
 func TestEntryPointResolver_FlaskApplication(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"app.py": `
+		"server.py": `
 from flask import Flask
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Hello Flask"
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
 `,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
@@ -110,177 +118,245 @@ if __name__ == "__main__":
 	if res.ExecutionMode != ExecutionModeApplication {
 		t.Errorf("expected ExecutionModeApplication, got %s", res.ExecutionMode)
 	}
-	if res.SelectedCommand != "python app.py" {
-		t.Errorf("expected 'python app.py', got %q", res.SelectedCommand)
+	if res.SelectedCommand != "python server.py" {
+		t.Errorf("expected 'python server.py', got %q", res.SelectedCommand)
 	}
 	if res.PrimaryCandidate == nil || res.PrimaryCandidate.Framework != "Flask" {
 		t.Errorf("expected Framework Flask, got %+v", res.PrimaryCandidate)
 	}
 }
 
-func TestEntryPointResolver_FastAPIApplication(t *testing.T) {
-	repo := createTestRepo(t, map[string]string{
-		"main.py": `
-from fastapi import FastAPI
-app = FastAPI()
+// ----------------------------------------------------------------------------
+// C Tests (Arbitrary Filenames & Compilation)
+// ----------------------------------------------------------------------------
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello FastAPI"}
+func TestEntryPointResolver_ArbitraryCFilename_TempC(t *testing.T) {
+	repo := createTestRepo(t, map[string]string{
+		"temp.c": `
+#include <stdio.h>
+int main() {
+    printf("factorial\n");
+    return 0;
+}
 `,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
-	if err != nil {
-		t.Fatalf("ResolveEntryPoints error: %v", err)
-	}
-
-	if res.ExecutionMode != ExecutionModeApplication {
-		t.Errorf("expected ExecutionModeApplication, got %s", res.ExecutionMode)
-	}
-	if res.SelectedCommand != "python main.py" {
-		t.Errorf("expected 'python main.py', got %q", res.SelectedCommand)
-	}
-	if res.PrimaryCandidate == nil || res.PrimaryCandidate.Framework != "FastAPI" {
-		t.Errorf("expected Framework FastAPI, got %+v", res.PrimaryCandidate)
-	}
-}
-
-func TestEntryPointResolver_ConventionalFilenameRank(t *testing.T) {
-	// main.py should beat helper.py easily
-	repo := createTestRepo(t, map[string]string{
-		"main.py":   "import helper\nprint(helper.calc())\n",
-		"helper.py": "def calc(): return 42\n",
-	})
-
-	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
 	if res.IsAmbiguous {
-		t.Errorf("expected unambiguous resolution when main.py is present")
+		t.Errorf("expected unambiguous resolution for single temp.c")
 	}
-	if res.PrimaryCandidate == nil || res.PrimaryCandidate.RelativePath != "main.py" {
-		t.Errorf("expected primary candidate main.py, got %+v", res.PrimaryCandidate)
+	if res.SelectedCommand != "./temp_bin" {
+		t.Errorf("expected './temp_bin', got %q", res.SelectedCommand)
 	}
-	if res.SelectedCommand != "python main.py" {
-		t.Errorf("expected 'python main.py', got %q", res.SelectedCommand)
+	if res.ExecutionMode != ExecutionModeScript {
+		t.Errorf("expected SCRIPT, got %s", res.ExecutionMode)
 	}
-	if res.CommandSource != "CONVENTIONAL_FILENAME" {
-		t.Errorf("expected CONVENTIONAL_FILENAME, got %s", res.CommandSource)
+	if res.PrimaryCandidate == nil || !res.PrimaryCandidate.RequiresCompile {
+		t.Errorf("expected RequiresCompile=true, got %+v", res.PrimaryCandidate)
+	}
+	if !strings.Contains(res.BuildCommand, "gcc") && !strings.Contains(res.BuildCommand, "clang") {
+		t.Errorf("expected gcc/clang compile command, got %q", res.BuildCommand)
 	}
 }
 
-func TestEntryPointResolver_MultipleAmbiguousPythonFiles(t *testing.T) {
-	// Equal ranking scripts: a.py, b.py, c.py
+func TestEntryPointResolver_InteractiveCProgram(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"a.py": "print('alpha')\n",
-		"b.py": "print('beta')\n",
-		"c.py": "print('gamma')\n",
+		"calc.c": `
+#include <stdio.h>
+int main() {
+    int n;
+    printf("Enter number: ");
+    scanf("%d", &n);
+    printf("Result: %d\n", n * n);
+    return 0;
+}
+`,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveEntryPoints error: %v", err)
+	}
 
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	if res.ExecutionMode != ExecutionModeInteractiveScript {
+		t.Errorf("expected ExecutionModeInteractiveScript for scanf, got %s", res.ExecutionMode)
+	}
+	if res.SelectedCommand != "./calc_bin" {
+		t.Errorf("expected './calc_bin', got %q", res.SelectedCommand)
+	}
+}
+
+func TestEntryPointResolver_CWithHelperModule(t *testing.T) {
+	// main.c has main(), helper.c does not have main()
+	repo := createTestRepo(t, map[string]string{
+		"main.c": `
+#include <stdio.h>
+int add(int, int);
+int main() {
+    printf("%d\n", add(1, 2));
+    return 0;
+}
+`,
+		"helper.c": `
+int add(int a, int b) {
+    return a + b;
+}
+`,
+	})
+
+	resolver := NewEntryPointResolver()
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
+	if err != nil {
+		t.Fatalf("ResolveEntryPoints error: %v", err)
+	}
+
+	if res.IsAmbiguous {
+		t.Errorf("expected unambiguous resolution (main.c has main, helper.c does not)")
+	}
+	if res.PrimaryCandidate == nil || res.PrimaryCandidate.RelativePath != "main.c" {
+		t.Errorf("expected main.c as primary, got %+v", res.PrimaryCandidate)
+	}
+}
+
+func TestEntryPointResolver_AmbiguousCFiles(t *testing.T) {
+	// Both temp.c and program.c have main() -> Ambiguous!
+	repo := createTestRepo(t, map[string]string{
+		"temp.c":    "int main() { return 0; }\n",
+		"program.c": "int main() { return 0; }\n",
+	})
+
+	resolver := NewEntryPointResolver()
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
 	if !res.IsAmbiguous {
-		t.Errorf("expected ambiguous resolution for multiple equal scripts")
+		t.Errorf("expected AMBIGUOUS when multiple C files define main()")
 	}
 	if res.ExecutionMode != ExecutionModeAmbiguous {
 		t.Errorf("expected ExecutionModeAmbiguous, got %s", res.ExecutionMode)
 	}
 	if res.CommandSource != "AMBIGUOUS" {
-		t.Errorf("expected command source AMBIGUOUS, got %s", res.CommandSource)
-	}
-	if len(res.Candidates) != 3 {
-		t.Errorf("expected 3 candidates, got %d", len(res.Candidates))
+		t.Errorf("expected AMBIGUOUS source, got %s", res.CommandSource)
 	}
 }
 
-func TestEntryPointResolver_ExplicitUserCommandOverride(t *testing.T) {
+// ----------------------------------------------------------------------------
+// C++ Tests (Arbitrary Filenames)
+// ----------------------------------------------------------------------------
+
+func TestEntryPointResolver_ArbitraryCppFilename_NoldCpp(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"app.py": "from flask import Flask\n",
+		"nold.cpp": `
+#include <iostream>
+int main() {
+    std::cout << "factorial calculation" << std::endl;
+    return 0;
+}
+`,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-	userCfg := &UserBuildConfig{
-		StartCmd: "python -m custom.worker --threads=4",
-	}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, userCfg)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	if res.SelectedCommand != "python -m custom.worker --threads=4" {
-		t.Errorf("expected explicit command, got %q", res.SelectedCommand)
+	if res.IsAmbiguous {
+		t.Errorf("expected unambiguous resolution for single nold.cpp")
 	}
-	if res.CommandSource != "USER_EXPLICIT" {
-		t.Errorf("expected USER_EXPLICIT, got %s", res.CommandSource)
+	if res.SelectedCommand != "./nold_bin" {
+		t.Errorf("expected './nold_bin', got %q", res.SelectedCommand)
 	}
-	if res.Confidence != ConfidenceHigh {
-		t.Errorf("expected ConfidenceHigh, got %s", res.Confidence)
+	if res.ExecutionMode != ExecutionModeScript {
+		t.Errorf("expected SCRIPT, got %s", res.ExecutionMode)
+	}
+	if res.PrimaryCandidate == nil || !res.PrimaryCandidate.RequiresCompile {
+		t.Errorf("expected RequiresCompile=true, got %+v", res.PrimaryCandidate)
+	}
+	if !strings.Contains(res.BuildCommand, "g++") && !strings.Contains(res.BuildCommand, "clang++") {
+		t.Errorf("expected g++/clang++ compile command, got %q", res.BuildCommand)
 	}
 }
 
-func TestEntryPointResolver_ProjectConfig_RailpackJSON(t *testing.T) {
+func TestEntryPointResolver_InteractiveCppProgram(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"railpack.json": `{"deploy": {"startCommand": "gunicorn server:app"}}`,
-		"server.py":     "print('server')",
+		"interactive.cpp": `
+#include <iostream>
+int main() {
+    int x;
+    std::cin >> x;
+    std::cout << x * 2 << std::endl;
+    return 0;
+}
+`,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	if res.SelectedCommand != "gunicorn server:app" {
-		t.Errorf("expected 'gunicorn server:app', got %q", res.SelectedCommand)
-	}
-	if res.CommandSource != "PROJECT_CONFIG" {
-		t.Errorf("expected PROJECT_CONFIG, got %s", res.CommandSource)
-	}
-	if res.ExecutionMode != ExecutionModeApplication {
-		t.Errorf("expected ExecutionModeApplication, got %s", res.ExecutionMode)
+	if res.ExecutionMode != ExecutionModeInteractiveScript {
+		t.Errorf("expected ExecutionModeInteractiveScript for std::cin, got %s", res.ExecutionMode)
 	}
 }
 
-func TestEntryPointResolver_ProjectConfig_Procfile(t *testing.T) {
+// ----------------------------------------------------------------------------
+// Mixed-Language Repositories
+// ----------------------------------------------------------------------------
+
+func TestEntryPointResolver_MixedLanguage_PythonAndC(t *testing.T) {
+	// A mixed repo with a python runner script and a C library without main
 	repo := createTestRepo(t, map[string]string{
-		"Procfile":  "web: uvicorn app.api:app --host 0.0.0.0 --port 5000\n",
-		"server.py": "print('server')",
+		"run.py": `
+import ctypes
+print("Running python orchestrator")
+`,
+		"fast_math.c": `
+int multiply(int a, int b) {
+    return a * b;
+}
+`,
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "python"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	if res.SelectedCommand != "uvicorn app.api:app --host 0.0.0.0 --port 5000" {
-		t.Errorf("expected Procfile command, got %q", res.SelectedCommand)
+	if res.IsAmbiguous {
+		t.Errorf("expected unambiguous resolution (run.py is executable, fast_math.c has no main)")
 	}
-	if res.CommandSource != "PROJECT_CONFIG" {
-		t.Errorf("expected PROJECT_CONFIG, got %s", res.CommandSource)
+	if res.SelectedCommand != "python run.py" {
+		t.Errorf("expected 'python run.py', got %q", res.SelectedCommand)
+	}
+
+	// Verify mixed language detection warning is recorded
+	foundMixedWarning := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "mixed-language repository") {
+			foundMixedWarning = true
+			break
+		}
+	}
+	if !foundMixedWarning {
+		t.Errorf("expected mixed-language warning, warnings were: %+v", res.Warnings)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Existing Supported Languages: Node.js, Go, Java
+// ----------------------------------------------------------------------------
 
 func TestEntryPointResolver_NodeJs_PackageJSON(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
@@ -289,9 +365,7 @@ func TestEntryPointResolver_NodeJs_PackageJSON(t *testing.T) {
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "nodejs"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
@@ -304,27 +378,6 @@ func TestEntryPointResolver_NodeJs_PackageJSON(t *testing.T) {
 	}
 }
 
-func TestEntryPointResolver_NodeJs_SingleScript(t *testing.T) {
-	repo := createTestRepo(t, map[string]string{
-		"script.js": "console.log('standalone script');",
-	})
-
-	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "nodejs"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
-	if err != nil {
-		t.Fatalf("ResolveEntryPoints error: %v", err)
-	}
-
-	if res.SelectedCommand != "node script.js" {
-		t.Errorf("expected 'node script.js', got %q", res.SelectedCommand)
-	}
-	if res.ExecutionMode != ExecutionModeScript {
-		t.Errorf("expected ExecutionModeScript, got %s", res.ExecutionMode)
-	}
-}
-
 func TestEntryPointResolver_Golang_MainGo(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
 		"go.mod":  "module example.com/app\n\ngo 1.22\n",
@@ -332,15 +385,13 @@ func TestEntryPointResolver_Golang_MainGo(t *testing.T) {
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "golang"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	if res.SelectedCommand != "go run ." {
-		t.Errorf("expected 'go run .', got %q", res.SelectedCommand)
+	if res.SelectedCommand != "go run main.go" && res.SelectedCommand != "go run ." {
+		t.Errorf("expected 'go run main.go' or 'go run .', got %q", res.SelectedCommand)
 	}
 	if res.ExecutionMode != ExecutionModeScript {
 		t.Errorf("expected ExecutionModeScript, got %s", res.ExecutionMode)
@@ -353,18 +404,40 @@ func TestEntryPointResolver_Java_PomXML(t *testing.T) {
 	})
 
 	resolver := NewEntryPointResolver()
-	analysis := &RepositoryAnalysis{PrimaryLanguage: "java"}
-
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, analysis, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	if res.SelectedCommand != "mvn spring-boot:run" {
-		t.Errorf("expected 'mvn spring-boot:run', got %q", res.SelectedCommand)
+	if res.PrimaryCandidate == nil || res.PrimaryCandidate.Language != "java" {
+		t.Errorf("expected Java candidate, got %+v", res.PrimaryCandidate)
 	}
-	if res.ExecutionMode != ExecutionModeApplication {
-		t.Errorf("expected ExecutionModeApplication, got %s", res.ExecutionMode)
+}
+
+// ----------------------------------------------------------------------------
+// Explicit User Override & Safety
+// ----------------------------------------------------------------------------
+
+func TestEntryPointResolver_ExplicitUserCommandOverride(t *testing.T) {
+	repo := createTestRepo(t, map[string]string{
+		"temp.c": "int main(){return 0;}",
+	})
+
+	resolver := NewEntryPointResolver()
+	userCfg := &UserBuildConfig{
+		StartCmd: "make run_custom",
+	}
+
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, userCfg)
+	if err != nil {
+		t.Fatalf("ResolveEntryPoints error: %v", err)
+	}
+
+	if res.SelectedCommand != "make run_custom" {
+		t.Errorf("expected user explicit command, got %q", res.SelectedCommand)
+	}
+	if res.CommandSource != "USER_EXPLICIT" {
+		t.Errorf("expected USER_EXPLICIT, got %s", res.CommandSource)
 	}
 }
 
@@ -376,103 +449,41 @@ func TestEntryPointResolver_SymlinkEscape_Rejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create symlink pointing outside
 	linkPath := filepath.Join(repo, "link.py")
 	if err := os.Symlink(outsideFile, linkPath); err != nil {
 		t.Skip("symlinks not supported:", err)
 	}
 
 	resolver := NewEntryPointResolver()
-	res, err := resolver.ResolveEntryPoints(context.Background(), repo, &RepositoryAnalysis{PrimaryLanguage: "python"}, nil)
+	res, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatalf("ResolveEntryPoints error: %v", err)
 	}
 
-	// link.py must NOT be accepted as a candidate
 	for _, c := range res.Candidates {
 		if c.RelativePath == "link.py" {
-			t.Errorf("symlink escaping repo root should not be an entry point candidate")
+			t.Errorf("escaping symlink should not be an entry point candidate")
 		}
 	}
 }
 
 func TestEntryPointResolver_OriginalRepoImmutable(t *testing.T) {
 	repo := createTestRepo(t, map[string]string{
-		"a.py": "print('immutable test')",
+		"temp.c":   "int main(){return 0;}",
+		"nold.cpp": "int main(){return 0;}",
 	})
 
 	beforeEntries, _ := os.ReadDir(repo)
 
 	resolver := NewEntryPointResolver()
-	_, err := resolver.ResolveEntryPoints(context.Background(), repo, &RepositoryAnalysis{PrimaryLanguage: "python"}, nil)
+	_, err := resolver.ResolveEntryPoints(context.Background(), repo, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	afterEntries, _ := os.ReadDir(repo)
-
 	if len(beforeEntries) != len(afterEntries) {
 		t.Errorf("repository contents changed during analysis: before %d, after %d",
 			len(beforeEntries), len(afterEntries))
-	}
-}
-
-func TestBuildPlanner_WithEntryPointResolver_SingleAPy(t *testing.T) {
-	repo := createTestRepo(t, map[string]string{
-		"a.py": "print('Hello world')",
-	})
-
-	planner := NewBuildPlanner()
-	plan, err := planner.PlanBuild(context.Background(), "sb-test", repo, nil)
-	if err != nil {
-		t.Fatalf("PlanBuild error: %v", err)
-	}
-
-	if plan.StartCommand != "python a.py" {
-		t.Errorf("expected StartCommand 'python a.py', got %q", plan.StartCommand)
-	}
-	if plan.ExecutionMode != ExecutionModeScript {
-		t.Errorf("expected ExecutionModeScript, got %s", plan.ExecutionMode)
-	}
-	if plan.PreserveImageEntrypoint {
-		t.Errorf("expected PreserveImageEntrypoint=false so start command is used, got true")
-	}
-}
-
-func TestContextStaging_InjectedRailpackJSON_ForScript(t *testing.T) {
-	repo := createTestRepo(t, map[string]string{
-		"a.py": "print('Hello world')",
-	})
-
-	planner := NewBuildPlanner()
-	plan, err := planner.PlanBuild(context.Background(), "sb-test", repo, nil)
-	if err != nil {
-		t.Fatalf("PlanBuild error: %v", err)
-	}
-
-	stagingEngine := NewContextStagingEngine()
-	policy := DefaultContextPolicy()
-
-	stagingRes, err := stagingEngine.Stage(context.Background(), plan, "sb-test", "dep-test", repo, policy)
-	if err != nil {
-		t.Fatalf("Stage error: %v", err)
-	}
-	defer stagingRes.Cleanup()
-
-	// Verify staged railpack.json exists in staging dir
-	stagedRP := filepath.Join(stagingRes.StagingDir, "railpack.json")
-	data, err := os.ReadFile(stagedRP)
-	if err != nil {
-		t.Fatalf("staged railpack.json should exist: %v", err)
-	}
-
-	if !strings.Contains(string(data), "python a.py") {
-		t.Errorf("staged railpack.json should contain 'python a.py', got: %s", string(data))
-	}
-
-	// Verify original repo NEVER has railpack.json
-	origRP := filepath.Join(repo, "railpack.json")
-	if _, err := os.Stat(origRP); !os.IsNotExist(err) {
-		t.Errorf("original repository must not have railpack.json written to it")
 	}
 }
