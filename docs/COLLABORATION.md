@@ -77,3 +77,4 @@ Users can create separate, dedicated projects to collaborate with teammates:
 
 - **Collaborator Presence**: Active team members working simultaneously are badged with real-time presence indicators.
 - **Concurrent Idle Prevention**: If User A is actively coding in Monaco while User B is idle, User A's activity automatically keeps the sandbox runtime awake for the entire team.
+

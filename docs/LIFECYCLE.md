@@ -20,21 +20,23 @@ This document details the complete sandbox lifecycle state machine, idle detecti
                    ┌────────────┐  idle timeout expires
        ┌──────────▶│  RUNNING   │──────────────────────┐
        │           └─────▲──────┘                      │
+       │                 │ (ExpiresAt = ZERO /         ▼
+       │                 │  Countdown Inactive)┌───────────────┐
+       │                 │                     │ IDLE WARNING  │ (within 2m of timeout)
+       │ (HTTP wake-up / │                     └───────┬───────┘
+       │  singleflight)  │                             │
        │                 │                             ▼
-       │ (HTTP wake-up / │                     ┌───────────────┐
-       │  singleflight)  │                     │ IDLE WARNING  │ (within 2m of timeout)
-       │                 │                     └───────┬───────┘
-       │           ┌─────┴──────┐                      │
-       │           │   WAKING   │                      ▼
-       │           └─────▲──────┘              ┌───────────────┐
-       │                 │                     │ GRACE PERIOD  │ (60s countdown)
-       │                 │                     └───────┬───────┘
-       │           ┌─────┴──────┐                      │ (no member reset)
-       └───────────│ HIBERNATED │◀─────────────────────┘
-                   └─────┬──────┘ (Container stopped, memory freed, disk preserved)
-                         │
-                         │ (Hard lifetime ExpiresAt reached from ANY state)
-                         ▼
+       │           ┌─────┴──────┐              ┌───────────────┐
+       │           │   WAKING   │              │ GRACE PERIOD  │ (60s countdown)
+       │           └─────▲──────┘              └───────┬───────┘
+       │                 │ (Readiness                  │ (no member reset)
+       │                 │  Succeeds)                  ▼
+       │           ┌─────┴──────┐  Sliding Expiry Clock┌───────────────┐
+       └───────────│ HIBERNATED │─────────────────────▶│  COUNTDOWN    │ (hibernated_at + timeout)
+                   └─────┬──────┘  Starts Upon Entry   └───────┬───────┘
+                         │                                     │
+                         │ (ExpiresAt reached while hibernated)│
+                         ▼                                     ▼
                    ┌────────────┐
                    │  EXPIRED   │ (Runtime container destroyed; workspace data retained for 7 days)
                    └─────┬──────┘
@@ -139,3 +141,47 @@ All 12 required failure-injection and unit test cases are implemented and passin
 | `TestWebSocketHeartbeatDoesNotPreventHibernation` | Passive logs/stats websockets do not reset idle deadlines |
 | `TestGracePeriodCannotBypassExpiration` | Grace period is truncated if approaching `ExpiresAt` |
 | `TestDataPreservation_WorkspaceRetainedAndRestorable` | Preserved files restore into a new sandbox; expired container retired |
+
+---
+
+## 8. Resettable Sliding Expiration Policy & Fencing Tokens
+
+The platform implements a **sliding expiration policy** tied directly to the hibernation lifecycle:
+
+1. **Sliding Countdown Only When Hibernated**:
+   - While `RUNNING`, the expiration timer is completely inactive (`ExpiresAt` is zero, UI displays `"Not applicable"`).
+   - Upon entering `HIBERNATED`, `hibernated_at` is stamped and sliding expiration is calculated:
+     $$\text{expires\_at} = \text{hibernated\_at} + \text{configured\_hibernated\_expiration\_seconds}$$
+2. **Invalidation on Wake-Up**:
+   - When an authorized user wakes the sandbox and readiness health checks pass, the sandbox transitions to `RUNNING`.
+   - `ExpiresAt` is zeroed, `hibernated_at` is cleared, and `lifecycle_version` is atomically incremented.
+3. **Fencing Tokens (`lifecycle_version`)**:
+   - Expiration workers execute compare-and-swap (CAS) updates:
+     `UPDATE sandboxes SET status = 'expired' WHERE id = $1 AND lifecycle_version = $2 AND status = 'hibernated' AND expires_at <= $3`
+   - If a user woke the sandbox while an expiration job was in-flight, the version mismatch aborts teardown with 0 rows updated, preventing race condition destruction.
+4. **Dynamic Recalibration**:
+   - If an administrator or user updates the expiration timeout while the sandbox is already hibernated, `expires_at` is immediately recalibrated:
+     $$\text{new\_expires\_at} = \text{hibernated\_at} + \text{new\_timeout}$$
+
+### Verification Suite: Resettable Expiration Tests
+
+All 14 lifecycle and failure-injection tests are passing in `backend/internal/proxy/resettable_expiration_test.go`:
+
+| Test Name | Behavior Verified |
+|---|---|
+| `TestResettableExpiry_HibernatesAndStartsCountdown` | Entering `HIBERNATED` records `hibernated_at` and sets `expires_at = now + timeout` |
+| `TestResettableExpiry_UserWakesBeforeExpiration` | Wake-up atomically clears expiration deadline and sets status `RUNNING` |
+| `TestResettableExpiry_RunningHasNoActiveExpiration` | Running sandboxes display "Not applicable" for expiration |
+| `TestResettableExpiry_HibernatingAgainGetsFreshDeadline` | Subsequent hibernation receives a completely fresh expiration deadline |
+| `TestResettableExpiry_ExpiredSandboxRejectsWake` | Expired sandboxes reject wake-up requests with HTTP 410 Gone |
+| `TestResettableExpiry_FailedWakePreservesDeadline` | Failed wake attempts do not grant extra time or clear deadline |
+| `TestResettableExpiry_ConcurrentWakeDeduplication` | Simultaneous wake requests share a singleflight container start |
+| `TestResettableExpiry_OldExpirationJobAbortedByFencing` | Stale expiration jobs with mismatched `lifecycle_version` abort teardown |
+| `TestResettableExpiry_WorkerRestartRecovery` | Worker recovers authoritative state directly from PostgreSQL |
+| `TestResettableExpiry_RedisRestartPreservesAuthoritativeDB` | Cache flush or Redis restart preserves database ground truth |
+| `TestResettableExpiry_ConfigChangeWhileHibernated` | Timeout change while hibernated dynamically recalibrates `expires_at` |
+| `TestResettableExpiry_ConfigChangeDuringWaking` | Settings updates during `WAKING` do not bypass readiness checks |
+| `TestResettableExpiry_ContainerRemovedWhileDBHibernated` | Missing container reports clean error without corrupting DB state |
+| `TestResettableExpiry_DBRunningContainerStoppedReconciliation` | Reconciles stopped container state gracefully |
+
+

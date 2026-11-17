@@ -247,6 +247,8 @@ func (s *Server) Router() http.Handler {
 			pr.Post("/{id}/operations/start", s.handleStartOperation)
 			pr.Post("/{id}/operations/end", s.handleEndOperation)
 			pr.Post("/{id}/restore", s.handleRestoreExpiredSandbox)
+			pr.Put("/{id}/settings", s.handleUpdateSettings)
+			pr.Patch("/{id}/settings", s.handleUpdateSettings)
 
 			// Phase F/G: in-browser editor + git push.
 			pr.Get("/{id}/files", s.handleFileTree)

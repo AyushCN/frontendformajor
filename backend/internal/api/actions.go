@@ -457,22 +457,108 @@ func (s *Server) handleLifecycleStatus(w http.ResponseWriter, r *http.Request) {
 	inGrace := s.cache.InGracePeriod(r.Context(), sb.ID)
 	hasUserActivity := s.cache.HasActiveUserActivity(r.Context(), sb.ID)
 
-	// Data retention window: workspace data is retained for 7 days post-expiry
-	retentionUntil := sb.ExpiresAt.Add(7 * 24 * time.Hour)
+	retentionDur := time.Duration(sb.WorkspaceRetentionSeconds) * time.Second
+	if retentionDur <= 0 {
+		retentionDur = 7 * 24 * time.Hour
+	}
+
+	var expirationRemainingSec *int64
+	var expiresAtVal *time.Time
+	expirationCountdownText := "Not applicable"
+
+	if sb.Status == db.StatusHibernated && !sb.ExpiresAt.IsZero() && sb.ExpiresAt.After(time.Unix(0, 0)) {
+		rem := int64(time.Until(sb.ExpiresAt).Seconds())
+		expirationRemainingSec = &rem
+		expiresAtVal = &sb.ExpiresAt
+		if rem <= 0 {
+			expirationCountdownText = "Expired"
+		} else {
+			hours := rem / 3600
+			mins := (rem % 3600) / 60
+			secs := rem % 60
+			expirationCountdownText = fmt.Sprintf("%02d:%02d:%02d", hours, mins, secs)
+		}
+	} else if sb.Status == db.StatusExpired {
+		expirationCountdownText = "Expired"
+	}
+
+	var retentionExpiresAt time.Time
+	if sb.DestroyedAt != nil {
+		retentionExpiresAt = sb.DestroyedAt.Add(retentionDur)
+	} else if sb.Status == db.StatusHibernated && expiresAtVal != nil {
+		retentionExpiresAt = expiresAtVal.Add(retentionDur)
+	} else {
+		retentionExpiresAt = time.Now().Add(retentionDur)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sandbox_id":               sb.ID,
-		"status":                   sb.Status,
-		"idle_timeout_seconds":     sb.IdleTimeoutSeconds,
-		"idle_ttl_remaining_sec":   int64(ttl.Seconds()),
-		"has_active_user_activity": hasUserActivity,
-		"in_hibernation_warning":   inWarning,
-		"in_grace_period":          inGrace,
-		"active_operation":         activeOp,
-		"has_active_operation":     hasOp,
-		"expires_at":               sb.ExpiresAt,
-		"workspace_preserved":      true,
-		"retention_expires_at":     retentionUntil,
+		"sandbox_id":                    sb.ID,
+		"status":                        sb.Status,
+		"lifecycle_version":             sb.LifecycleVersion,
+		"idle_timeout_seconds":          sb.IdleTimeoutSeconds,
+		"idle_ttl_remaining_sec":        int64(ttl.Seconds()),
+		"has_active_user_activity":      hasUserActivity,
+		"in_hibernation_warning":        inWarning,
+		"in_grace_period":               inGrace,
+		"active_operation":              activeOp,
+		"has_active_operation":          hasOp,
+		"hibernated_at":                 sb.HibernatedAt,
+		"hibernated_expiration_seconds": sb.HibernatedExpirationSeconds,
+		"workspace_retention_seconds":   sb.WorkspaceRetentionSeconds,
+		"expiration_active":             sb.Status == db.StatusHibernated,
+		"expires_at":                    expiresAtVal,
+		"expiration_remaining_sec":      expirationRemainingSec,
+		"expiration_countdown_text":     expirationCountdownText,
+		"workspace_preserved":           true,
+		"retention_expires_at":          retentionExpiresAt,
+	})
+}
+
+type updateSettingsRequest struct {
+	IdleTimeoutSeconds          *int   `json:"idleTimeoutSeconds"`
+	HibernatedExpirationSeconds *int64 `json:"hibernatedExpirationSeconds"`
+	WorkspaceRetentionSeconds   *int64 `json:"workspaceRetentionSeconds"`
+	LifetimeSeconds             *int64 `json:"lifetimeSeconds"`
+	StartCommand                *string `json:"startCommand"`
+	Port                        *int    `json:"port"`
+	HealthCheckType             *string `json:"healthCheckType"`
+}
+
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.requireOwnedSandbox(w, r)
+	if !ok {
+		return
+	}
+	var req updateSettingsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	idleSec := sb.IdleTimeoutSeconds
+	if req.IdleTimeoutSeconds != nil && *req.IdleTimeoutSeconds > 0 {
+		idleSec = *req.IdleTimeoutSeconds
+	}
+
+	hibExpSec := sb.HibernatedExpirationSeconds
+	if req.HibernatedExpirationSeconds != nil && *req.HibernatedExpirationSeconds > 0 {
+		hibExpSec = *req.HibernatedExpirationSeconds
+	}
+
+	retentionSec := sb.WorkspaceRetentionSeconds
+	if req.WorkspaceRetentionSeconds != nil && *req.WorkspaceRetentionSeconds > 0 {
+		retentionSec = *req.WorkspaceRetentionSeconds
+	}
+
+	if err := s.store.UpdateLifecycleConfig(sb.ID, idleSec, hibExpSec, retentionSec); err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not update lifecycle config")
+		return
+	}
+
+	updated, _ := s.store.GetSandbox(sb.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Lifecycle settings updated successfully",
+		"sandbox": s.sandboxJSON(updated),
 	})
 }
 

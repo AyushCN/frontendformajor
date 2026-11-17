@@ -30,4 +30,5 @@ type Store interface {
 	ListDeployments(sandboxID string) ([]*db.Deployment, error)
 	ListWarningThresholds(sandboxID string) ([]string, error)
 	QueryResourceSnapshots(sandboxID string, since, until time.Time, limit int) ([]*db.ResourceSnapshot, error)
+	UpdateLifecycleConfig(id string, idleTimeoutSec int, hibernatedExpirySec, retentionSec int64) error
 }

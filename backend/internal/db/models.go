@@ -105,6 +105,12 @@ type Sandbox struct {
 	DestroyedAt       *time.Time
 	DestructionReason string
 
+	// Resettable sliding expiration after hibernation
+	HibernatedAt                *time.Time
+	HibernatedExpirationSeconds int64 `gorm:"not null;default:7200"`
+	WorkspaceRetentionSeconds   int64 `gorm:"not null;default:604800"`
+	LifecycleVersion            int64 `gorm:"not null;default:1"`
+
 	DetectedLanguage string         `gorm:"type:text"`
 	BuildConfig      datatypes.JSON `gorm:"type:jsonb"`
 	AISuggestedEnv   datatypes.JSON `gorm:"type:jsonb"`

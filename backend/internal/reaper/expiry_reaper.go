@@ -51,22 +51,37 @@ func (r *ExpiryReaper) tick(ctx context.Context) {
 		return
 	}
 	for _, sb := range due {
-		// Tear down by label even when container_id is empty: a deploy that
-		// failed before recording the container can still leave a sidecar,
-		// volume, network, or image behind. The nil guard keeps the reaper
-		// testable with a nil orchestrator; production always has one.
+		now := time.Now().UTC()
+
+		// Fencing Token & Immediate Expiration Validation:
+		// Atomically transition from HIBERNATED -> EXPIRED only if lifecycle_version matches
+		// and the sandbox is still hibernated with expired deadline.
+		expiredOk, err := r.store.ExpireHibernatedSandbox(sb.ID, sb.LifecycleVersion, now)
+		if err != nil {
+			r.logger.Warn("expiry-reaper: checking expiration validity", slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+			continue
+		}
+		if !expiredOk {
+			r.logger.Info("expiry-reaper: sandbox woke up or lifecycle version changed; stale expiration job aborted",
+				slog.String("sandbox", sb.ID),
+				slog.Int64("fenced_version", sb.LifecycleVersion))
+			continue
+		}
+
+		// Runtime container teardown: container, sidecars, volumes, and network
 		if r.orch != nil {
 			if err := r.orch.TeardownSandbox(ctx, sb); err != nil {
-				r.logger.Warn("expiry-reaper: teardown failed (will retry next tick)",
+				r.logger.Warn("expiry-reaper: teardown failed",
 					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
-				continue
 			}
 		}
+
 		// Data Preservation: Separate runtime lifecycle from workspace data retention.
-		// Runtime teardown terminates the active containers, volumes, and networking.
-		// The on-disk workspace data is preserved for a retention period (7 days) post-expiration,
-		// allowing project members to restore to a new sandbox instance or export changes.
-		retentionPeriod := 7 * 24 * time.Hour
+		// On-disk workspace data is preserved for the configured retention period post-expiration.
+		retentionPeriod := time.Duration(sb.WorkspaceRetentionSeconds) * time.Second
+		if retentionPeriod <= 0 {
+			retentionPeriod = 7 * 24 * time.Hour // default 7 days
+		}
 		if sb.DestroyedAt != nil && time.Since(*sb.DestroyedAt) > retentionPeriod {
 			if err := orchestrator.RemoveSandboxWorkDir(r.cfg.SandboxWorkDir, sb.Subdomain); err != nil {
 				r.logger.Warn("expiry-reaper: removing retention-expired work dir",
@@ -74,28 +89,14 @@ func (r *ExpiryReaper) tick(ctx context.Context) {
 			}
 		}
 
-		now := time.Now()
-		if err := r.store.UpdateSandbox(sb.ID, map[string]any{
-			"status":             string(db.StatusExpired),
-			"destroyed_at":       now,
-			"destruction_reason": string(db.DestroyLifetimeExpired),
-			"container_id":       "",
-			"image_tag":          "",
-		}); err != nil {
-			r.logger.Warn("expiry-reaper: marking sandbox expired",
-				slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
-			continue
-		}
-		// Tombstone committed: sweep for containers a racing deploy created
-		// between the teardown above and this write (same contract as the
-		// manual destroy path).
+		// Sweep for lingering containers
 		if r.orch != nil {
 			if err := r.orch.SweepSandboxContainers(ctx, sb.ID); err != nil {
 				r.logger.Warn("expiry-reaper: post-tombstone container sweep",
 					slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
 			}
 		}
-		r.logger.Info("expiry-reaper: destroyed sandbox",
+		r.logger.Info("expiry-reaper: expired runtime container successfully torn down (workspace preserved)",
 			slog.String("sandbox", sb.ID), slog.String("subdomain", sb.Subdomain))
 	}
 }

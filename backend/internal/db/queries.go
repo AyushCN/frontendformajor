@@ -299,15 +299,94 @@ func (s *Store) ListActiveSandboxes() ([]*Sandbox, error) {
 	return out, nil
 }
 
-// ListDuedExpiredSandboxes finds non-destroyed sandboxes whose deadline has
-// passed. This is the only query the destroyer worker makes, so it stays on
-// the partial index from the schema.
+// ListDuedExpiredSandboxes finds non-destroyed hibernated sandboxes whose expiration
+// deadline has passed. Running sandboxes are never expired by this query.
 func (s *Store) ListDuedExpiredSandboxes(now time.Time) ([]*Sandbox, error) {
 	var out []*Sandbox
-	if err := s.db.Where("expires_at < ? AND destroyed_at IS NULL", now).Find(&out).Error; err != nil {
+	if err := s.db.Where(
+		"destroyed_at IS NULL AND status = ? AND expires_at > ? AND expires_at <= ?",
+		StatusHibernated, time.Unix(0, 0), now,
+	).Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("db: listing expired sandboxes: %w", err)
 	}
 	return out, nil
+}
+
+// TransitionToHibernated atomically marks a sandbox hibernated, records hibernated_at,
+// calculates a fresh expires_at deadline, and increments lifecycle_version to invalidate
+// any prior or concurrent jobs.
+func (s *Store) TransitionToHibernated(id string, hibernatedAt, expiresAt time.Time) error {
+	now := time.Now().UTC()
+	res := s.db.Model(&Sandbox{}).Where("id = ? AND status = ?", id, StatusRunning).Updates(map[string]any{
+		"status":            StatusHibernated,
+		"hibernated_at":     hibernatedAt,
+		"expires_at":        expiresAt,
+		"lifecycle_version": gorm.Expr("lifecycle_version + 1"),
+		"updated_at":        now,
+	})
+	if res.Error != nil {
+		return fmt.Errorf("db: transition to hibernated: %w", res.Error)
+	}
+	return nil
+}
+
+// TransitionToRunning atomically marks a sandbox running after successful wake-up readiness,
+// clears hibernated_at and expires_at, and increments lifecycle_version to cancel any pending expiry jobs.
+func (s *Store) TransitionToRunning(id string) error {
+	now := time.Now().UTC()
+	res := s.db.Model(&Sandbox{}).Where("id = ? AND status IN ?", id, []SandboxStatus{StatusHibernated, StatusQueued, StatusBuilding}).Updates(map[string]any{
+		"status":            StatusRunning,
+		"hibernated_at":     nil,
+		"expires_at":        time.Unix(0, 0), // cleared / inactive
+		"lifecycle_version": gorm.Expr("lifecycle_version + 1"),
+		"updated_at":        now,
+	})
+	if res.Error != nil {
+		return fmt.Errorf("db: transition to running: %w", res.Error)
+	}
+	return nil
+}
+
+// ExpireHibernatedSandbox atomically transitions a hibernated sandbox to expired with fencing.
+// It verifies that lifecycle_version matches and status is still hibernated immediately before deletion.
+func (s *Store) ExpireHibernatedSandbox(id string, expectedVersion int64, now time.Time) (bool, error) {
+	res := s.db.Model(&Sandbox{}).
+		Where("id = ? AND lifecycle_version = ? AND status = ? AND expires_at <= ? AND destroyed_at IS NULL",
+			id, expectedVersion, StatusHibernated, now).
+		Updates(map[string]any{
+			"status":             string(StatusExpired),
+			"destroyed_at":       now,
+			"destruction_reason": string(DestroyLifetimeExpired),
+			"container_id":       "",
+			"image_tag":          "",
+			"lifecycle_version":  gorm.Expr("lifecycle_version + 1"),
+			"updated_at":         now,
+		})
+	if res.Error != nil {
+		return false, fmt.Errorf("db: expiring hibernated sandbox: %w", res.Error)
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// UpdateLifecycleConfig updates idle timeout, hibernated expiration, and workspace retention.
+// If the sandbox is currently hibernated, it dynamically adjusts expires_at = hibernated_at + timeout.
+func (s *Store) UpdateLifecycleConfig(id string, idleTimeoutSec int, hibernatedExpirySec, retentionSec int64) error {
+	sb, err := s.GetSandbox(id)
+	if err != nil {
+		return err
+	}
+	patch := map[string]any{
+		"idle_timeout_seconds":          idleTimeoutSec,
+		"hibernated_expiration_seconds": hibernatedExpirySec,
+		"workspace_retention_seconds":   retentionSec,
+		"updated_at":                    time.Now().UTC(),
+	}
+	if sb.Status == StatusHibernated && sb.HibernatedAt != nil && !sb.HibernatedAt.IsZero() {
+		newExpiry := sb.HibernatedAt.Add(time.Duration(hibernatedExpirySec) * time.Second)
+		patch["expires_at"] = newExpiry
+		patch["lifecycle_version"] = gorm.Expr("lifecycle_version + 1")
+	}
+	return s.db.Model(&Sandbox{}).Where("id = ?", id).Updates(patch).Error
 }
 
 // UpdateSandbox applies the non-zero fields of patch to the sandbox row.

@@ -268,10 +268,14 @@ func (s *Server) sandboxJSON(sb *db.Sandbox) map[string]any {
 		"container_id":         sb.ContainerID,
 		"internal_port":        sb.InternalPort,
 		"database_engine":      dbEngine,
-		"idle_timeout_seconds": sb.IdleTimeoutSeconds,
-		"last_request_at":      sb.LastRequestAt,
-		"lifetime_seconds":     sb.LifetimeSeconds,
-		"expires_at":           sb.ExpiresAt,
+		"idle_timeout_seconds":          sb.IdleTimeoutSeconds,
+		"last_request_at":               sb.LastRequestAt,
+		"lifetime_seconds":              sb.LifetimeSeconds,
+		"expires_at":                    sb.ExpiresAt,
+		"hibernated_at":                 sb.HibernatedAt,
+		"hibernated_expiration_seconds": sb.HibernatedExpirationSeconds,
+		"workspace_retention_seconds":   sb.WorkspaceRetentionSeconds,
+		"lifecycle_version":             sb.LifecycleVersion,
 		// Null until the sandbox first goes live; the client uses it to show that
 		// the lifetime clock has not started yet.
 		"activated_at":       sb.ActivatedAt,

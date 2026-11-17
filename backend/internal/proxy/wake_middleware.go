@@ -117,9 +117,12 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A destroyed or expired sandbox answers with a permanent status: the URL once
+	// A destroyed or expired sandbox answers with 410 Gone: the runtime once
 	// existed and cannot be revived.
-	if sandbox.DestroyedAt != nil || sandbox.Status == db.StatusExpired || (!sandbox.ExpiresAt.IsZero() && time.Now().After(sandbox.ExpiresAt)) {
+	isExpired := sandbox.DestroyedAt != nil || sandbox.Status == db.StatusExpired ||
+		(sandbox.Status == db.StatusHibernated && !sandbox.ExpiresAt.IsZero() && sandbox.ExpiresAt.After(time.Unix(0, 0)) && time.Now().After(sandbox.ExpiresAt))
+
+	if isExpired {
 		http.Error(w, "This sandbox has expired and cannot be revived. Persisted data remains accessible according to project retention policy.", http.StatusGone)
 		return
 	}
@@ -267,7 +270,7 @@ func (g *Gateway) executeWake(ctx context.Context, sandbox *db.Sandbox) error {
 	// The sandbox is up again; it is not hibernated anymore. Restart its stats
 	// collector so the dashboard keeps flowing.
 	g.orch.EnsureStatsCollector(sandbox.ID, sandbox.ContainerID)
-	if err := g.store.UpdateSandbox(sandbox.ID, map[string]any{"status": string(db.StatusRunning)}); err != nil {
+	if err := g.store.TransitionToRunning(sandbox.ID); err != nil {
 		return fmt.Errorf("marking running: %w", err)
 	}
 	g.logger.Info("gateway: sandbox woke successfully",

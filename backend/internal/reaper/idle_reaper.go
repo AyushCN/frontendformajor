@@ -113,11 +113,20 @@ func (r *IdleReaper) tick(ctx context.Context) {
 			r.logger.Debug("idle-reaper: clearing marker", slog.String("sandbox", sb.ID))
 		}
 		r.orch.StopStatsCollector(sb.ID)
-		if err := r.store.UpdateSandbox(sb.ID, map[string]any{
-			"status": string(db.StatusHibernated),
-		}); err != nil {
-			r.logger.Warn("idle-reaper: marking hibernated", slog.String("sandbox", sb.ID))
+
+		now := time.Now().UTC()
+		hibExpiration := sb.HibernatedExpirationSeconds
+		if hibExpiration <= 0 {
+			hibExpiration = 7200 // default 2 hours
 		}
-		r.logger.Info("idle-reaper: hibernated sandbox", slog.String("sandbox", sb.ID))
+		expiresAt := now.Add(time.Duration(hibExpiration) * time.Second)
+
+		if err := r.store.TransitionToHibernated(sb.ID, now, expiresAt); err != nil {
+			r.logger.Warn("idle-reaper: marking hibernated", slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+		}
+		r.logger.Info("idle-reaper: hibernated sandbox with sliding expiration countdown",
+			slog.String("sandbox", sb.ID),
+			slog.Time("hibernated_at", now),
+			slog.Time("expires_at", expiresAt))
 	}
 }
