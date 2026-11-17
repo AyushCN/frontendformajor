@@ -14,6 +14,7 @@ type Store interface {
 	UpsertUser(u *db.User) error
 	GetUserByGithubID(githubID int64) (*db.User, error)
 	GetUser(id string) (*db.User, error)
+	SearchUsers(query string, limit int) ([]*db.User, error)
 	OwnsSandbox(sandboxID, userID string) (bool, error)
 	GetSandbox(id string) (*db.Sandbox, error)
 	GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error)

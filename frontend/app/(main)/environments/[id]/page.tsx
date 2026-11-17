@@ -42,6 +42,8 @@ import {
   UserCheck,
   Sparkles,
   AlertTriangle,
+  Send,
+  X,
 } from "lucide-react";
 
 import { fetchWithAuth } from "@/lib/auth";
@@ -1982,52 +1984,112 @@ export default function EnvironmentDetail() {
 
                           {/* Role Selector & Actions */}
                           <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-outline-variant/30">
-                            {/* Role Dropdown (If Owner and not modifying self) */}
-                            {isOwnerOrAdmin && !isMe ? (
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[11px] text-on-surface-variant/60 hidden sm:inline">Role:</span>
-                                <select
-                                  value={collab.role === "COLLABORATOR" ? "EDITOR" : collab.role}
-                                  onChange={(e) => handleUpdateRole(collabUserId, e.target.value)}
-                                  className="text-xs bg-surface-container font-semibold rounded-lg px-2.5 py-1.5 border border-outline-variant text-on-surface focus:border-primary-fixed focus:outline-none cursor-pointer"
-                                >
-                                  <option value="OWNER">Owner (Full Access)</option>
-                                  <option value="EDITOR">Editor (Edit & Deploy)</option>
-                                  <option value="VIEWER">Viewer (Read Only)</option>
-                                </select>
-                              </div>
+                            {isPending ? (
+                              isOwnerOrAdmin && (
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        const inviteId = collab.inviteId || collab.id;
+                                        const res = await fetch(`/api/projects/${env?.projectId}/invites/${inviteId}/resend`, {
+                                          method: "POST",
+                                        });
+                                        if (res.ok) {
+                                          toast.success("Invitation resent successfully");
+                                          mutateMembers();
+                                        } else {
+                                          toast.error("Failed to resend invitation");
+                                        }
+                                      } catch {
+                                        toast.error("Error resending invitation");
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high border border-outline-variant text-on-surface-variant hover:text-on-surface text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer"
+                                    title="Resend invitation"
+                                  >
+                                    <Send className="w-3 h-3" />
+                                    <span>Resend</span>
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      if (!confirm(`Revoke invitation for ${collab.user?.username || collab.user?.email}?`)) return;
+                                      try {
+                                        const inviteId = collab.inviteId || collab.id;
+                                        const res = await fetch(`/api/projects/${env?.projectId}/invites/${inviteId}/revoke`, {
+                                          method: "POST",
+                                        });
+                                        if (res.ok) {
+                                          toast.success("Invitation revoked");
+                                          mutateMembers();
+                                        } else {
+                                          toast.error("Failed to revoke invitation");
+                                        }
+                                      } catch {
+                                        toast.error("Error revoking invitation");
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-error/10 hover:bg-error/20 border border-error/20 text-error text-xs font-semibold transition-colors flex items-center gap-1 cursor-pointer"
+                                    title="Revoke invitation"
+                                  >
+                                    <X className="w-3 h-3" />
+                                    <span>Revoke</span>
+                                  </button>
+                                </div>
+                              )
                             ) : (
-                              <div
-                                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${currentRoleCfg.badgeClass}`}
-                              >
-                                <RoleIcon className="w-3.5 h-3.5" />
-                                <span>{currentRoleCfg.label}</span>
-                              </div>
-                            )}
-
-                            {/* Remove / Leave Action Button */}
-                            {canRemove && (
-                              <button
-                                onClick={() => handleRemoveCollaborator(collabUserId, isMe)}
-                                className={`px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors text-xs font-medium cursor-pointer ${
-                                  isMe
-                                    ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border border-amber-500/20"
-                                    : "bg-error/10 text-error hover:bg-error/20 border border-error/20"
-                                }`}
-                                title={isMe ? "Leave this project" : "Remove collaborator"}
-                              >
-                                {isMe ? (
-                                  <>
-                                    <LogOut className="w-3.5 h-3.5" />
-                                    <span>Leave</span>
-                                  </>
+                              <>
+                                {/* Role Dropdown (If Owner and not modifying self) */}
+                                {isOwnerOrAdmin && !isMe ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-on-surface-variant/60 hidden sm:inline">Role:</span>
+                                    <select
+                                      value={collab.role === "COLLABORATOR" ? "EDITOR" : collab.role}
+                                      onChange={(e) => {
+                                        const newRole = e.target.value;
+                                        if (confirm(`Change role for ${collab.user?.username || collab.user?.email} to ${newRole}?`)) {
+                                          handleUpdateRole(collabUserId, newRole);
+                                        }
+                                      }}
+                                      className="text-xs bg-surface-container font-semibold rounded-lg px-2.5 py-1.5 border border-outline-variant text-on-surface focus:border-primary-fixed focus:outline-none cursor-pointer"
+                                    >
+                                      <option value="EDITOR">Editor (Edit & Deploy)</option>
+                                      <option value="VIEWER">Viewer (Read Only)</option>
+                                    </select>
+                                  </div>
                                 ) : (
-                                  <>
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    <span className="hidden sm:inline">Remove</span>
-                                  </>
+                                  <div
+                                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${currentRoleCfg.badgeClass}`}
+                                  >
+                                    <RoleIcon className="w-3.5 h-3.5" />
+                                    <span>{currentRoleCfg.label}</span>
+                                  </div>
                                 )}
-                              </button>
+
+                                {/* Remove / Leave Action Button */}
+                                {canRemove && (
+                                  <button
+                                    onClick={() => handleRemoveCollaborator(collabUserId, isMe)}
+                                    className={`px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors text-xs font-medium cursor-pointer ${
+                                      isMe
+                                        ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border border-amber-500/20"
+                                        : "bg-error/10 text-error hover:bg-error/20 border border-error/20"
+                                    }`}
+                                    title={isMe ? "Leave this project" : "Remove collaborator"}
+                                  >
+                                    {isMe ? (
+                                      <>
+                                        <LogOut className="w-3.5 h-3.5" />
+                                        <span>Leave</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        <span className="hidden sm:inline">Remove</span>
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         </div>
@@ -2285,6 +2347,8 @@ export default function EnvironmentDetail() {
         onClose={() => setIsInviteModalOpen(false)}
         onInvite={handleInvite}
         isInviting={isInviting}
+        projectId={env?.projectId}
+        projectName={project?.name || env?.name || "Environment Workspace"}
       />
 
       {/* Transfer Sandbox Modal */}

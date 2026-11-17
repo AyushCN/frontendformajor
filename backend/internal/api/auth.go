@@ -281,3 +281,28 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": devUser})
 }
+
+// handleSearchUsers searches registered users by username or email.
+func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		writeJSON(w, http.StatusOK, map[string]any{"users": []any{}})
+		return
+	}
+	users, err := s.store.SearchUsers(q, 10)
+	if err != nil {
+		s.logger.Warn("search users failed", slog.String("err", err.Error()))
+		writeErr(w, http.StatusInternalServerError, "failed to search users")
+		return
+	}
+	results := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		results = append(results, map[string]any{
+			"id":        u.ID,
+			"username":  u.Username,
+			"email":     u.Email,
+			"avatarUrl": u.AvatarURL,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": results})
+}

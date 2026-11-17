@@ -80,6 +80,19 @@ func (s *Store) GetUser(id string) (*User, error) {
 	return u, nil
 }
 
+// SearchUsers returns registered users whose username or email matches query.
+func (s *Store) SearchUsers(query string, limit int) ([]*User, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	searchPattern := "%" + query + "%"
+	var users []*User
+	if err := s.db.Where("email ILIKE ? OR username ILIKE ?", searchPattern, searchPattern).Limit(limit).Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("db: searching users: %w", err)
+	}
+	return users, nil
+}
+
 // ---- repositories -------------------------------------------------------
 
 // FindOrCreateRepository returns the user's repository row for githubURL,

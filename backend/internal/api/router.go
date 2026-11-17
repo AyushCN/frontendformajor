@@ -227,6 +227,7 @@ func (s *Server) Router() http.Handler {
 	r.Group(func(protected chi.Router) {
 		protected.Use(s.requireUser)
 		protected.Get("/api/me", s.handleMe)
+		protected.Get("/api/users/search", s.handleSearchUsers)
 
 		protected.Route("/api/sandboxes", func(pr chi.Router) {
 			pr.Get("/", s.handleListSandboxes)
