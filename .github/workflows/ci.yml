@@ -85,6 +85,10 @@ jobs:
 
           # Allow host and container traffic forwarding across Docker custom bridge networks
           sudo iptables -P FORWARD ACCEPT || true
+          # Docker's DOCKER-USER chain is evaluated before the FORWARD policy.
+          # Permit the host-side smoke test to probe containers on per-sandbox
+          # bridge networks created by the orchestrator.
+          sudo iptables -C DOCKER-USER -j ACCEPT 2>/dev/null || sudo iptables -I DOCKER-USER -j ACCEPT
 
       - name: Start Infrastructure Containers
         run: |
