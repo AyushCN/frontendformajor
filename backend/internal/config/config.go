@@ -60,10 +60,13 @@ type Config struct {
 	// BuildKitHost is the endpoint for BuildKit (e.g. unix:///var/run/buildkit/buildkitd.sock).
 	BuildKitHost string
 
-	// DevAuth, when true (default if GITHUB_CLIENT_ID is unset), lets requests
-	// authenticate with a fake GitHub identity so the deploy loop is testable
-	// without OAuth round-trips.
+	// DevAuth, when true (only permitted in local development if GITHUB_CLIENT_ID is unset
+	// and ALLOW_DEV_AUTH=true), lets requests authenticate with a mock identity.
+	// It is strictly disabled in production.
 	DevAuth bool
+
+	// Environment identifies the deployment environment ("production", "development", "test").
+	Environment string
 
 	// MaxLifetimeSeconds caps how far expires_at may be extended from original
 	// creation (default 7 days).
@@ -135,7 +138,17 @@ func Load() (*Config, error) {
 		GatewayRateLimitRPS:       envIntDefault("GATEWAY_RATE_LIMIT_RPS", 100),
 		GatewayRateLimitBurst:     envIntDefault("GATEWAY_RATE_LIMIT_BURST", 200),
 		GatewayMaxBodyBytes:       envInt64Default("GATEWAY_MAX_BODY_BYTES", 32*1024*1024),
-		DevAuth:                   os.Getenv("GITHUB_CLIENT_ID") == "",
+		Environment:               strings.ToLower(envDefault("ENV", envDefault("ENVIRONMENT", envDefault("APP_ENV", "development")))),
+	}
+
+	if cfg.IsProduction() {
+		if cfg.GitHubClientID == "" || cfg.GitHubClientSecret == "" || cfg.GitHubOAuthCallbackURL == "" {
+			return nil, fmt.Errorf("config: GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and GITHUB_OAUTH_CALLBACK_URL are required in production")
+		}
+		cfg.DevAuth = false
+	} else {
+		// In development or test, DevAuth can only be enabled if explicitly allowed or when GITHUB_CLIENT_ID is empty
+		cfg.DevAuth = envBoolDefault("ALLOW_DEV_AUTH", cfg.GitHubClientID == "")
 	}
 
 	if err := cfg.decryptKey(); err != nil {
@@ -163,6 +176,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: BUILD_CONCURRENCY must be between 1 and 100, got %d", cfg.BuildConcurrency)
 	}
 	return cfg, nil
+}
+
+// IsProduction returns true if the environment is configured as production.
+func (c *Config) IsProduction() bool {
+	return strings.EqualFold(c.Environment, "production") || strings.EqualFold(c.Environment, "prod")
 }
 
 // decryptKey validates and decodes SECRETS_ENCRYPTION_KEY.

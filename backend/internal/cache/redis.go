@@ -338,3 +338,24 @@ func DecodeStatFrame(raw []byte) (*StatFrame, error) {
 	}
 	return &f, nil
 }
+
+// RevokeSession marks a session token nonce as revoked until expiry.
+func (r *Redis) RevokeSession(ctx context.Context, sessionNonce string, ttl time.Duration) error {
+	if r == nil || r.client == nil || sessionNonce == "" {
+		return nil
+	}
+	return r.client.Set(ctx, "revoked:session:"+sessionNonce, "1", ttl).Err()
+}
+
+// IsSessionRevoked checks whether a session token nonce has been revoked.
+func (r *Redis) IsSessionRevoked(ctx context.Context, sessionNonce string) bool {
+	if r == nil || r.client == nil || sessionNonce == "" {
+		return false
+	}
+	n, err := r.client.Exists(ctx, "revoked:session:"+sessionNonce).Result()
+	if err != nil {
+		return false
+	}
+	return n > 0
+}
+

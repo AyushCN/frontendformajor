@@ -307,8 +307,19 @@ func (g *Gateway) authenticateRequest(r *http.Request) (*db.User, error) {
 		if err == nil {
 			plain, err := b.Decrypt([]byte(cookie.Value))
 			if err == nil {
-				githubID, err := strconv.ParseInt(string(plain), 10, 64)
+				parts := strings.Split(string(plain), ":")
+				githubID, err := strconv.ParseInt(parts[0], 10, 64)
 				if err == nil {
+					if len(parts) >= 3 {
+						if issuedAt, pErr := strconv.ParseInt(parts[1], 10, 64); pErr == nil {
+							if time.Since(time.Unix(issuedAt, 0)) > 30*24*time.Hour {
+								return nil, fmt.Errorf("session expired")
+							}
+						}
+						if g.cache != nil && g.cache.IsSessionRevoked(r.Context(), parts[2]) {
+							return nil, fmt.Errorf("session revoked")
+						}
+					}
 					return g.store.GetUserByGithubID(githubID)
 				}
 			}

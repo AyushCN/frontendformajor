@@ -157,7 +157,10 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.store.GetOrCreateDefaultProject(createdUser.ID)
 	}
 
-	session, err := s.box.Encrypt([]byte(strconv.FormatInt(user.GithubID, 10)))
+	// Session payload format: <githubID>:<issuedAtUnix>:<sessionNonce>
+	nonce := uuid.NewString()
+	payload := fmt.Sprintf("%d:%d:%s", user.GithubID, time.Now().Unix(), nonce)
+	session, err := s.box.Encrypt([]byte(payload))
 	if err != nil {
 		http.Error(w, "could not create session", http.StatusInternalServerError)
 		return
@@ -191,24 +194,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogout clears the session cookie.
-//
-// It is intentionally unauthenticated and idempotent: a caller with a missing,
-// corrupt or expired session must still be able to clear the cookie, otherwise
-// the only way out is to wait out the cookie's MaxAge. It answers 200 whether or
-// not a session was actually present, so the client's logout flow never has to
-// distinguish the two cases.
+// handleLogout clears the session cookie and blacklists the session nonce in Redis.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	// Mirror the attributes used when the session was set. Browsers identify a
-	// cookie by name+domain+path, but keeping HttpOnly/SameSite in step avoids a
-	// silent no-op if the set-cookie above ever gains Secure or a narrower Path.
+	// If a valid session cookie exists, extract nonce and revoke in cache
+	if cookie, err := r.Cookie(oauthStateCookie); err == nil && cookie.Value != "" {
+		if plain, dErr := s.box.Decrypt([]byte(cookie.Value)); dErr == nil {
+			parts := strings.Split(string(plain), ":")
+			if len(parts) >= 3 && s.cache != nil {
+				_ = s.cache.RevokeSession(r.Context(), parts[2], 30*24*time.Hour)
+			}
+		}
+	}
+
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || strings.HasPrefix(s.cfg.FrontendURL, "https://")
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   isSecure,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
@@ -229,7 +234,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 	})
 }
 
-// sessionUser decodes and authenticates the session cookie.
+// sessionUser decodes, authenticates, and validates the session cookie against expiration and revocation.
 func (s *Server) sessionUser(r *http.Request) (*db.User, error) {
 	cookie, err := r.Cookie(oauthStateCookie)
 	if err != nil {
@@ -239,10 +244,26 @@ func (s *Server) sessionUser(r *http.Request) (*db.User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid session cookie: %w", err)
 	}
-	githubID, err := strconv.ParseInt(string(plain), 10, 64)
+	parts := strings.Split(string(plain), ":")
+	githubID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("malformed session: %w", err)
 	}
+
+	if len(parts) >= 3 {
+		// Verify expiration (30 days max lifetime)
+		if issuedAt, pErr := strconv.ParseInt(parts[1], 10, 64); pErr == nil {
+			if time.Since(time.Unix(issuedAt, 0)) > 30*24*time.Hour {
+				return nil, fmt.Errorf("session expired")
+			}
+		}
+		// Verify revocation
+		sessionNonce := parts[2]
+		if s.cache != nil && s.cache.IsSessionRevoked(r.Context(), sessionNonce) {
+			return nil, fmt.Errorf("session revoked")
+		}
+	}
+
 	user, err := s.store.GetUserByGithubID(githubID)
 	if err != nil {
 		return nil, err
@@ -289,8 +310,8 @@ func (s *Server) fetchGithubUser(ctx context.Context, token string) (*githubProf
 }
 
 func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.DevAuth {
-		http.Error(w, "dev auth disabled", http.StatusForbidden)
+	if s.cfg.IsProduction() || !s.cfg.DevAuth {
+		http.Error(w, "dev auth disabled in production", http.StatusForbidden)
 		return
 	}
 	var req struct {

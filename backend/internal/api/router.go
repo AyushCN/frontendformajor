@@ -126,7 +126,7 @@ func (s *Server) locks() *workspacelock.Manager {
 // New assembles the Server with its ready-to-use dependencies.
 func New(
 	cfg *config.Config,
-	store *db.Store,
+	store Store,
 	cache *cache.Redis,
 	orch *orchestrator.Orchestrator,
 	deployer *orchestrator.Deployer,
@@ -134,7 +134,14 @@ func New(
 	aiClient *ai.Client,
 	logger *slog.Logger,
 ) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var gw *proxy.Gateway
+	if dbStore, ok := store.(*db.Store); ok {
+		gw = proxy.NewGateway(dbStore, cache, orch, cfg, logger)
+	}
 	return &Server{
 		cfg:            cfg,
 		store:          store,
@@ -144,7 +151,7 @@ func New(
 		box:            box,
 		ai:             aiClient,
 		logger:         logger,
-		gateway:        proxy.NewGateway(store, cache, orch, cfg, logger),
+		gateway:        gw,
 		workspaceLocks: workspacelock.NewManager(),
 		bgCtx:          bgCtx,
 		bgCancel:       bgCancel,
