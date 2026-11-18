@@ -64,7 +64,7 @@ Defaults are defined in [`backend/internal/config/config.go`](file:///home/sword
 | `GATEWAY_PORT` | `8090` | Single-flight wake-on-request proxy port |
 | `FRONTEND_URL` | `http://localhost:3000` | Allowed CORS origin and OAuth redirect target |
 | `SANDBOX_BASE_DOMAIN` | `sandbox.localhost` | Base domain for sandbox wildcards |
-| `BUILDKIT_HOST` | `tcp://127.0.0.1:1234` | BuildKit daemon TCP socket for Railpack builds |
+| `BUILDKIT_HOST` | `tcp://127.0.0.1:1234` | BuildKit daemon TCP socket for Railpack and Dockerfile builds |
 | `BUILDER` | `railpack` | Default builder engine (`railpack` or `nixpacks`) |
 | `SANDBOX_RUNTIME` | `""` | Set to `"runsc"` to enable Google gVisor kernel sandboxing |
 | `MAX_LIFETIME_SECONDS`| `604800` | Maximum lifetime cap (7 days) |
@@ -83,10 +83,10 @@ docker compose -f docker-compose.dev.yml up -d
 
 | Service | Host Port | Internal Port | Purpose |
 |---|---|---|---|
-| **PostgreSQL** | `5434` | `5432` | Platform metadata, users, sandboxes, deployments (`user:pass`, DB `sandbox_platform`) |
+| **PostgreSQL** | `5434` | `5432` | Platform metadata, users, sandboxes, deployments, telemetry (`user:pass`, DB `sandbox_platform`) |
 | **Redis** | `6380` | `6379` | Ephemeral hot state (idle TTL keys `lr:<id>`, live stats buffer) |
 | **Traefik Edge** | `80`, `8081` | `80`, `8080` | Wildcard reverse proxy (`:80`) and admin dashboard (`http://localhost:8081/dashboard/`) |
-| **BuildKit** | `1234` | `1234` | Rootless BuildKit daemon for high-performance layer-cached Railpack builds |
+| **BuildKit** | `1234` | `1234` | Rootless BuildKit daemon for high-performance layer-cached Railpack and Dockerfile builds |
 
 > [!IMPORTANT]
 > - Postgres host port is mapped to **`5434`** (not `5432`) to prevent collisions with existing PostgreSQL instances running on the host machine.
@@ -95,7 +95,26 @@ docker compose -f docker-compose.dev.yml up -d
 
 ---
 
-## 4. Backend Service (Control Plane & Gateway)
+## 4. Database Migrations
+
+Database migrations are tracked in [`backend/migrations/`](file:///home/swordrookie/projects/api_sandbox_links/api-sandbox-links/backend/migrations) (0001 through 0008).
+
+### Option A: Automatic Migration (Default)
+The backend API server automatically executes pending database migrations at startup via embedded SQL assets.
+
+### Option B: Standalone Migration CLI
+To run migrations explicitly without launching the API server:
+
+```bash
+cd backend
+go run ./cmd/migrate up    # Apply all pending migrations (0001 through 0008)
+go run ./cmd/migrate down  # Roll back the most recent migration
+cd ..
+```
+
+---
+
+## 5. Backend Service (Control Plane & Gateway)
 
 Build the Go backend from the `backend/` directory:
 
@@ -108,11 +127,21 @@ cd ..
 
 ### Running Backend Tests
 
-The test suites run without external dependencies by default, skipping suites that require live infrastructure unless configured:
+> [!TIP]
+> If running in an environment where the default host `$GOPATH` (`~/go`) is on a read-only filesystem, point `GOPATH` to a local workspace directory:
+> ```bash
+> export GOPATH=$(pwd)/.gopath
+> ```
+
+To run unit tests, race detector tests, and runtime availability suites:
 
 ```bash
-# Run unit and race detector tests
-cd backend && go test -race ./...
+# Run orchestrator and runtime unit tests with race detection
+cd backend
+go test -v -count=1 -race ./internal/orchestrator/...
+
+# Run all backend unit tests
+go test -race ./...
 ```
 
 For integration testing against real Docker and Postgres:
@@ -144,7 +173,7 @@ ss -ltn | grep -E ':(8080|8090|3000|5434|6380|1234)'
 
 ---
 
-## 5. Frontend Application (Next.js 16 Console)
+## 6. Frontend Application (Next.js 16 Console)
 
 From the repository root, install and start the frontend:
 
@@ -157,15 +186,16 @@ npm run dev
 Open **[http://localhost:3000](http://localhost:3000)** in your browser.
 
 - API requests to `/api/*` are handled by Next.js BFF route handlers and proxied to the Go backend on `http://localhost:8080`.
-- Verify TypeScript types anytime with:
+- Verify TypeScript types and build integrity anytime with:
   ```bash
   npx tsc --noEmit
+  npm run build
   ```
 - Workspace projects and collaborator mappings are persisted locally at `/tmp/api-sandbox-links/projects.json`.
 
 ---
 
-## 6. GitHub OAuth Setup (Optional)
+## 7. GitHub OAuth Setup (Optional)
 
 To enable GitHub sign-in and commit-pushing instead of local dev auth:
 
@@ -178,7 +208,7 @@ To enable GitHub sign-in and commit-pushing instead of local dev auth:
 
 ---
 
-## 7. First End-to-End Sandbox Deployment
+## 8. First End-to-End Sandbox Deployment
 
 1. Open **[http://localhost:3000/dashboard](http://localhost:3000/dashboard)**.
 2. Click **+ New Sandbox**.
@@ -190,13 +220,15 @@ To enable GitHub sign-in and commit-pushing instead of local dev auth:
 
 ---
 
-## 8. Troubleshooting & Common Pitfalls
+## 9. Troubleshooting & Common Pitfalls
 
 | Symptom | Root Cause | Solution |
 |---|---|---|
 | `config: DATABASE_URL and REDIS_URL are required` | Backend executed from `backend/` instead of repository root. | `cd ..` to repo root and run `./backend/server`. |
 | `connection refused on 5434` | Postgres container not running or ports mapped incorrectly. | Run `docker compose -f docker-compose.dev.yml up -d postgres`. |
-| `relation "env_vars" does not exist` | GORM table-name override omitted. | `EnvVar` maps to `sandbox_env_vars` (see [DATABASE.md](DATABASE.md)). |
+| `go: could not create module cache: mkdir ...: read-only file system` | Host `$GOPATH` is read-only. | Set `export GOPATH=$(pwd)/.gopath` before running `go` commands. |
+| `cmd/migrate: directory not found` | Invoking old path or missing file. | Run from `backend/` directory: `go run ./cmd/migrate up`. |
 | `WebSocket connection lost (code 1006)` | Backend `:8080` process is not running, or cookie is expired. | Check `curl http://localhost:8080/api/health`. If backend is up, re-authenticate. |
 | Container shows "Port not responding" | Application binds a non-standard port not detected in plan. | Orchestrator probes common ports (`8080`, `3000`, `5000`, etc.) up to 90s. Ensure app listens on `0.0.0.0`. |
 | `Railpack build failed: dial tcp 127.0.0.1:1234` | BuildKit daemon container is stopped. | Verify BuildKit is running: `docker compose -f docker-compose.dev.yml up -d buildkit`. |
+| `unsupported runtime version: python 3.5` | Railpack native provider does not support Python < 3.10. | The system automatically routes to the legacy Dockerfile strategy (`python:3.5-slim`). Ensure Docker daemon is available. |

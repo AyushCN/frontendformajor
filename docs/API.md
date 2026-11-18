@@ -79,8 +79,35 @@ Returned by all sandbox endpoints (`sandboxJSON`):
   "lifetime_seconds": 86400,                              // Optional (300 to 604800, default 86400)
   "idle_timeout_seconds": 900,                            // Optional (default 900)
   "database": "auto",                                     // "auto" | "postgres" | "mysql" | "none"
-  "env_vars": { "API_KEY": "sandbox_secret_key" }         // Encrypted with AES-256-GCM at rest
+  "env_vars": { "API_KEY": "sandbox_secret_key" },        // Encrypted with AES-256-GCM at rest
+  "build_config": {
+    "runtime_version": "python:3.11"                      // Optional explicit runtime selection
+  }
 }
+```
+
+### The Deployment Object — `GET /api/sandboxes/{id}/deployments`
+Returns chronological deployments with runtime telemetry:
+
+```jsonc
+[
+  {
+    "id": "e4f8841c-80a5-4e31-8ca6-b82531a7b458",
+    "sandbox_id": "6a90fec3-8aad-4024-b83e-1cb76d867c9f",
+    "trigger": "initial",                                 // "initial" | "save_redeploy" | "github_push"
+    "status": "success",                                  // "building" | "success" | "failed"
+    "requested_runtime": "python:3.11",                   // Requested runtime constraint
+    "resolved_runtime": "python 3.11.9",                  // Canonical exact resolved runtime
+    "runtime_artifact_id": "asl-runtime-python-3.11.9-amd64-7e2f10b0", // Immutable cache key
+    "provisioning_status": "VERSION_SUPPORTED",           // VERSION_SUPPORTED | VERSION_PROVISIONING_REQUIRED | ...
+    "build_failure_reason": null,                         // Categorized failure reason on error
+    "build_duration_ms": 1420,
+    "image_size_bytes": 145892340,
+    "log_excerpt": "=> [1/4] FROM ghcr.io/railpack-runtime...",
+    "created_at": "2026-11-15T06:22:05Z",
+    "updated_at": "2026-11-15T06:22:19Z"
+  }
+]
 ```
 
 ---
