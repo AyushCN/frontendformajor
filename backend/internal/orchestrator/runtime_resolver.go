@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -30,12 +31,19 @@ const (
 type RuntimeResolution struct {
 	Runtime          string                  `json:"runtime"`           // e.g. "python", "nodejs", "golang"
 	Version          string                  `json:"version"`           // e.g. "3.11.9", "20.x"
+	ExactVersion     string                  `json:"exact_version"`     // e.g. "3.11.9", "22.14.0", "1.24.0", "21.0.2"
+	Status           VersionStatus           `json:"status"`            // VERSION_SUPPORTED, VERSION_PROVISIONING_REQUIRED, etc.
 	Source           RuntimeResolutionSource `json:"source"`
 	Confidence       ConfidenceLevel         `json:"confidence"`
 	Constraints      []string                `json:"constraints"`       // Constraints considered during resolution
 	Warnings         []string                `json:"warnings,omitempty"`
 	Conflicts        []string                `json:"conflicts,omitempty"`
 	RequiresOverride bool                    `json:"requires_override"` // True if explicit config conflicts with package needs
+	TargetOS         string                  `json:"target_os,omitempty"`
+	TargetArch       string                  `json:"target_arch,omitempty"`
+	ArtifactID       string                  `json:"artifact_id,omitempty"`
+	Strategy         string                  `json:"strategy,omitempty"` // "railpack" or "dockerfile"
+	LegacyImage      string                  `json:"legacy_image,omitempty"`
 }
 
 // VersionRange defines a closed interval [MinMajor.MinMinor, MaxMajor.MaxMinor].
@@ -207,11 +215,25 @@ var (
 )
 
 // RuntimeResolver resolves compatible language runtimes.
-type RuntimeResolver struct{}
+type RuntimeResolver struct {
+	policy *LegacyRuntimePolicy
+}
 
 // NewRuntimeResolver creates a new RuntimeResolver.
 func NewRuntimeResolver() *RuntimeResolver {
-	return &RuntimeResolver{}
+	return &RuntimeResolver{
+		policy: NewLegacyRuntimePolicy(),
+	}
+}
+
+// NewRuntimeResolverWithPolicy creates a RuntimeResolver with an explicit legacy runtime policy.
+func NewRuntimeResolverWithPolicy(policy *LegacyRuntimePolicy) *RuntimeResolver {
+	if policy == nil {
+		policy = NewLegacyRuntimePolicy()
+	}
+	return &RuntimeResolver{
+		policy: policy,
+	}
 }
 
 // ResolveRuntime executes deterministic runtime version resolution following the approved precedence.
@@ -228,24 +250,34 @@ func (r *RuntimeResolver) ResolveRuntime(workDir string, analysis *RepositoryAna
 		lang = strings.ToLower(strings.TrimSpace(userCfg.Language))
 	}
 
+	var res RuntimeResolution
+	var err error
+
 	switch lang {
 	case "python":
-		return r.resolvePythonRuntime(workDir, analysis, userCfg)
+		res, err = r.resolvePythonRuntime(workDir, analysis, userCfg)
 	case "nodejs":
-		return r.resolveNodeRuntime(workDir, analysis, userCfg)
+		res, err = r.resolveNodeRuntime(workDir, analysis, userCfg)
 	case "golang":
-		return r.resolveGoRuntime(workDir, analysis, userCfg)
+		res, err = r.resolveGoRuntime(workDir, analysis, userCfg)
 	case "java":
-		return r.resolveJavaRuntime(workDir, analysis, userCfg)
+		res, err = r.resolveJavaRuntime(workDir, analysis, userCfg)
 	default:
-		return RuntimeResolution{
+		res = RuntimeResolution{
 			Runtime:    lang,
 			Version:    "",
 			Source:     SourcePlatformDefault,
 			Confidence: ConfidenceLow,
 			Warnings:   []string{"Unrecognized primary language; falling back to builder default"},
-		}, nil
+		}
 	}
+
+	if err != nil {
+		return res, err
+	}
+
+	r.finalizeResolution(&res)
+	return res, nil
 }
 
 // resolvePythonRuntime enforces strict Railpack Python precedence:
@@ -655,4 +687,159 @@ func cleanVersionString(s string) string {
 	clean = strings.TrimPrefix(clean, "python-")
 	clean = strings.TrimPrefix(clean, "node-")
 	return clean
+}
+
+// finalizeResolution canonicalizes exact version, validates against OS/arch and legacy policies,
+// computes the immutable artifact identity, and determines the true VersionStatus.
+func (r *RuntimeResolver) finalizeResolution(res *RuntimeResolution) {
+	if res.Version == "" {
+		res.Status = VersionSupported
+		return
+	}
+
+	if res.ExactVersion == "" {
+		res.ExactVersion = r.resolveExactVersion(res.Runtime, res.Version)
+	}
+
+	res.TargetOS = strings.ToLower(runtime.GOOS)
+	res.TargetArch = NormalizeArch(runtime.GOARCH)
+
+	// Validate target OS and architecture
+	if valid, reason := ValidateArchOS(res.TargetOS, res.TargetArch); !valid {
+		res.Status = VersionIncompatible
+		res.Conflicts = append(res.Conflicts, reason)
+		return
+	}
+
+	// Validate against legacy and EOL policies
+	policy := r.policy
+	if policy == nil {
+		policy = NewLegacyRuntimePolicy()
+	}
+
+	status, strategy, legacyImgOrReason := policy.EvaluateVersion(res.Runtime, res.Version)
+	res.Strategy = strategy
+	res.LegacyImage = legacyImgOrReason
+
+	if status == VersionUnsupported {
+		res.Status = VersionUnsupported
+		res.Conflicts = append(res.Conflicts, legacyImgOrReason)
+		res.Warnings = append(res.Warnings, fmt.Sprintf("Unsupported %s version %s: %s", res.Runtime, res.Version, legacyImgOrReason))
+		return
+	}
+
+	// If explicit user choice conflicts with dependency compatibility
+	if res.RequiresOverride || (len(res.Conflicts) > 0 && res.Source == SourceUserExplicit) {
+		res.Status = VersionIncompatible
+		return
+	}
+
+	if strategy == "dockerfile" && legacyImgOrReason != "" {
+		res.Status = VersionProvisioningRequired
+		res.Warnings = append(res.Warnings, fmt.Sprintf("%s %s is not supported by standard Railpack provider; using isolated legacy Dockerfile strategy with approved image %s", res.Runtime, res.Version, legacyImgOrReason))
+	} else {
+		res.Status = VersionSupported
+	}
+
+	key := DefaultRuntimeCacheKey(res.Runtime, res.ExactVersion, "", "")
+	res.ArtifactID = key.Key()
+}
+
+// resolveExactVersion resolves canonical exact version requirements (e.g. Python 3.11.9, Node.js 22.14.0, Go 1.24.0, Java 21.0.2).
+func (r *RuntimeResolver) resolveExactVersion(lang, ver string) string {
+	clean := cleanVersionString(ver)
+	switch strings.ToLower(lang) {
+	case "python":
+		maj, min, ok := parseMajorMinor(clean)
+		if !ok {
+			return clean
+		}
+		parts := strings.Split(clean, ".")
+		if len(parts) >= 3 {
+			return clean
+		}
+		switch fmt.Sprintf("%d.%d", maj, min) {
+		case "3.11":
+			return "3.11.9"
+		case "3.10":
+			return "3.10.14"
+		case "3.12":
+			return "3.12.7"
+		case "3.9":
+			return "3.9.19"
+		case "3.8":
+			return "3.8.18"
+		case "3.7":
+			return "3.7.17"
+		case "3.6":
+			return "3.6.15"
+		case "3.5":
+			return "3.5.10"
+		case "3.4":
+			return "3.4.10"
+		case "2.7":
+			return "2.7.18"
+		default:
+			return clean + ".0"
+		}
+	case "nodejs", "node":
+		parts := strings.Split(clean, ".")
+		if len(parts) >= 3 {
+			return clean
+		}
+		maj, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return clean
+		}
+		switch maj {
+		case 22:
+			return "22.14.0"
+		case 20:
+			return "20.18.0"
+		case 18:
+			return "18.20.5"
+		case 16:
+			return "16.20.2"
+		case 14:
+			return "14.21.3"
+		default:
+			return fmt.Sprintf("%d.0.0", maj)
+		}
+	case "golang", "go":
+		if strings.HasSuffix(clean, ".x") {
+			base := strings.TrimSuffix(clean, ".x")
+			return base + ".0"
+		}
+		parts := strings.Split(clean, ".")
+		if len(parts) >= 3 {
+			return clean
+		}
+		if len(parts) == 2 {
+			return clean + ".0"
+		}
+		return clean
+	case "java":
+		parts := strings.Split(clean, ".")
+		if len(parts) >= 3 {
+			return clean
+		}
+		maj, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return clean
+		}
+		switch maj {
+		case 21:
+			return "21.0.2"
+		case 17:
+			return "17.0.10"
+		case 23:
+			return "23.0.1"
+		case 11:
+			return "11.0.22"
+		default:
+			return fmt.Sprintf("%d.0.0", maj)
+		}
+	default:
+		return clean
+	}
 }

@@ -123,6 +123,41 @@ func (s *ContextStagingEngine) Stage(
 		}
 	}
 
+	// Inject isolated legacy Dockerfile if legacy strategy selected and no Dockerfile exists in repo.
+	if plan.BuilderSelectionSource == "LEGACY_RUNTIME_STRATEGY" {
+		dfPath := filepath.Join(stagingDir, "Dockerfile")
+		if _, statErr := os.Stat(dfPath); os.IsNotExist(statErr) {
+			legacyBase := plan.Runtime.LegacyImage
+			if legacyBase == "" {
+				legacyBase = "python:3.5-slim"
+			}
+			port := plan.InternalPort
+			if port <= 0 {
+				port = 8080
+			}
+			start := plan.StartCommand
+			if start == "" {
+				start = "python app.py"
+			}
+
+			content := fmt.Sprintf(`FROM %s
+WORKDIR /app
+COPY . /app
+RUN --mount=type=cache,id=asl-pip-linux-amd64,target=/root/.cache/pip \
+    if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || pip install -r requirements.txt; fi
+EXPOSE %d
+CMD ["sh", "-c", "%s"]
+`, legacyBase, port, start)
+
+			if writeErr := os.WriteFile(dfPath, []byte(content), 0644); writeErr == nil {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("injected isolated legacy Dockerfile with approved image %s into staging context (not written to original repo)", legacyBase))
+			} else {
+				result.Errors = append(result.Errors, fmt.Sprintf("inject legacy Dockerfile: %v", writeErr))
+			}
+		}
+	}
+
 	// Compute deterministic fingerprint.
 	result.Fingerprint = computeFingerprint(inspection.Files, plan.SelectedBuilder, plan.Runtime.Version)
 

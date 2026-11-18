@@ -35,8 +35,19 @@ func NewBuilderStrategySelector() *BuilderStrategySelector {
 // SelectBuilder determines which builder engine to use based on strict precedence:
 // 1. Explicit user builder selection
 // 2. Automatic Dockerfile detection (root Dockerfile or configured path)
-// 3. Railpack automatic fallback
+// 3. Legacy runtime strategy routing (if runtime requires isolated Dockerfile)
+// 4. Railpack automatic fallback
 func (s *BuilderStrategySelector) SelectBuilder(workDir string, analysis *RepositoryAnalysis, userCfg *UserBuildConfig) (BuilderSelection, error) {
+	return s.SelectBuilderWithRuntime(workDir, analysis, userCfg, nil)
+}
+
+// SelectBuilderWithRuntime incorporates runtime resolution outcomes (including legacy policies) into builder selection.
+func (s *BuilderStrategySelector) SelectBuilderWithRuntime(
+	workDir string,
+	analysis *RepositoryAnalysis,
+	userCfg *UserBuildConfig,
+	runtimeRes *RuntimeResolution,
+) (BuilderSelection, error) {
 	effectiveDir := workDir
 	if userCfg != nil && strings.TrimSpace(userCfg.RootDir) != "" {
 		clean := filepath.Clean(strings.TrimSpace(userCfg.RootDir))
@@ -98,7 +109,32 @@ func (s *BuilderStrategySelector) SelectBuilder(workDir string, analysis *Reposi
 		}, nil
 	}
 
-	// 3. Supported Railpack automatic fallback
+	// 3. Isolated legacy runtime build strategy routing
+	// If the runtime requires a legacy container strategy (e.g. Python 3.5-3.9, Node 14-16)
+	if runtimeRes != nil && runtimeRes.Strategy == "dockerfile" && runtimeRes.Status != VersionUnsupported {
+		return BuilderSelection{
+			SelectedBuilder: "dockerfile",
+			SelectionSource: "LEGACY_RUNTIME_STRATEGY",
+		}, nil
+	}
+	if userCfg != nil && userCfg.RuntimeVersion != "" {
+		policy := NewLegacyRuntimePolicy()
+		lang := "python"
+		if userCfg.Language != "" {
+			lang = userCfg.Language
+		} else if analysis != nil && analysis.PrimaryLanguage != "" {
+			lang = analysis.PrimaryLanguage
+		}
+		status, strategy, _ := policy.EvaluateVersion(lang, userCfg.RuntimeVersion)
+		if strategy == "dockerfile" && status != VersionUnsupported {
+			return BuilderSelection{
+				SelectedBuilder: "dockerfile",
+				SelectionSource: "LEGACY_RUNTIME_STRATEGY",
+			}, nil
+		}
+	}
+
+	// 4. Supported Railpack automatic fallback
 	return BuilderSelection{
 		SelectedBuilder: "railpack",
 		SelectionSource: "AUTOMATIC_RAILPACK",

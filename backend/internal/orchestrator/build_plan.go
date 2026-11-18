@@ -214,9 +214,16 @@ func (p *BuildPlanner) PlanBuild(ctx context.Context, sandboxID, workDir string,
 	if err != nil {
 		return nil, fmt.Errorf("build planner: runtime resolution failed: %w", err)
 	}
+	if runtimeRes.Status == VersionUnsupported {
+		errMsg := fmt.Sprintf("unsupported runtime version %s %s", runtimeRes.Runtime, runtimeRes.Version)
+		if len(runtimeRes.Conflicts) > 0 {
+			errMsg = runtimeRes.Conflicts[0]
+		}
+		return nil, fmt.Errorf("build planner: %s", errMsg)
+	}
 
 	// Step 3: Builder Strategy Selection (Phase 2 Component B)
-	builderSel, err := p.strategySelector.SelectBuilder(effectiveDir, analysis, userCfg)
+	builderSel, err := p.strategySelector.SelectBuilderWithRuntime(effectiveDir, analysis, userCfg, &runtimeRes)
 	if err != nil {
 		return nil, fmt.Errorf("build planner: builder selection failed: %w", err)
 	}

@@ -174,6 +174,11 @@ func (d *Deployer) DeploySandbox(ctx context.Context, sandbox *db.Sandbox, opts 
 		builderName = d.orch.Builder().Name()
 	}
 
+	var requestedRuntime string
+	var resolvedRuntime string
+	var runtimeArtifactID string
+	var provisioningStatus string
+
 	deploy, err := d.store.CreateDeployment(&db.Deployment{
 		SandboxID: sandbox.ID,
 		Trigger:   string(opts.Trigger),
@@ -200,13 +205,26 @@ func (d *Deployer) DeploySandbox(ctx context.Context, sandbox *db.Sandbox, opts 
 		}
 
 		patch := map[string]any{
-			"status":      string(db.DeployFailed),
-			"log_excerpt": logExcerpt,
-			"finished_at": now,
-			"builder":     builderName,
+			"status":               string(db.DeployFailed),
+			"log_excerpt":          logExcerpt,
+			"finished_at":          now,
+			"builder":              builderName,
+			"build_failure_reason": cause.Error(),
 		}
 		if buildDuration != nil {
 			patch["build_duration_ms"] = *buildDuration
+		}
+		if requestedRuntime != "" {
+			patch["requested_runtime"] = requestedRuntime
+		}
+		if resolvedRuntime != "" {
+			patch["resolved_runtime"] = resolvedRuntime
+		}
+		if runtimeArtifactID != "" {
+			patch["runtime_artifact_id"] = runtimeArtifactID
+		}
+		if provisioningStatus != "" {
+			patch["provisioning_status"] = provisioningStatus
 		}
 		_ = d.store.UpdateDeployment(deploy.ID, patch)
 		// A failed deploy must not leave any runtime behind. Tear down by the
@@ -314,6 +332,21 @@ func (d *Deployer) DeploySandbox(ctx context.Context, sandbox *db.Sandbox, opts 
 	resolvedConfig, err := configResolver.Resolve(deployCtx, builder, workDir, userCfg)
 	if err != nil {
 		return markFailed(fmt.Errorf("build configuration: %w", err))
+	}
+
+	if userCfg != nil && strings.TrimSpace(userCfg.RuntimeVersion) != "" {
+		requestedRuntime = strings.TrimSpace(userCfg.RuntimeVersion)
+		if userCfg.Language != "" {
+			requestedRuntime = fmt.Sprintf("%s:%s", strings.ToLower(userCfg.Language), requestedRuntime)
+		}
+	}
+	if resolvedConfig != nil && resolvedConfig.RuntimeVersion != "" {
+		resolvedRuntime = resolvedConfig.RuntimeVersion
+		if resolvedConfig.Language != "" {
+			resolvedRuntime = fmt.Sprintf("%s:%s", strings.ToLower(resolvedConfig.Language), resolvedRuntime)
+		}
+		runtimeArtifactID = DefaultRuntimeCacheKey(resolvedConfig.Language, resolvedConfig.RuntimeVersion, "", "").Key()
+		provisioningStatus = string(VersionSupported)
 	}
 
 	// Update deployment record with true resolved builder
@@ -454,11 +487,15 @@ func (d *Deployer) DeploySandbox(ctx context.Context, sandbox *db.Sandbox, opts 
 	}
 
 	deployPatch := map[string]any{
-		"status":            string(db.DeploySuccess),
-		"log_excerpt":       truncate(buildLog.String(), 4000),
-		"finished_at":       now,
-		"builder":           builderName,
-		"build_duration_ms": buildDurationMs,
+		"status":              string(db.DeploySuccess),
+		"log_excerpt":         truncate(buildLog.String(), 4000),
+		"finished_at":         now,
+		"builder":             builderName,
+		"build_duration_ms":   buildDurationMs,
+		"requested_runtime":   requestedRuntime,
+		"resolved_runtime":    resolvedRuntime,
+		"runtime_artifact_id": runtimeArtifactID,
+		"provisioning_status": provisioningStatus,
 	}
 	if imageSizeBytes != nil {
 		deployPatch["image_size_bytes"] = *imageSizeBytes
