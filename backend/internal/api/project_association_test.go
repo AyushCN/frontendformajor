@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,7 +37,7 @@ func TestProjectAssociation_CreateSandboxWithIntegrity(t *testing.T) {
 		},
 	}
 
-	srv := &Server{store: mockStore}
+	srv := &Server{store: mockStore, logger: slog.Default()}
 
 	// 1. Success creating in shared project
 	body, _ := json.Marshal(map[string]any{
@@ -88,7 +89,7 @@ func TestProjectAssociation_CreateSandboxWithIntegrity(t *testing.T) {
 
 func TestProjectAssociation_SerializationNoFallbackGuessing(t *testing.T) {
 	mockStore := newMockProjectsStore()
-	srv := &Server{store: mockStore}
+	srv := &Server{store: mockStore, logger: slog.Default()}
 
 	unassociatedSB := &db.Sandbox{
 		ID:           uuid.NewString(),
@@ -132,7 +133,7 @@ func TestProjectAssociation_TransferSandbox(t *testing.T) {
 	mockStore.sandboxes[sb.ID] = sb
 	mockStore.sbProjects[sb.ID] = projA.ID
 
-	srv := &Server{store: mockStore}
+	srv := &Server{store: mockStore, logger: slog.Default()}
 
 	// 1. Successful transfer to Project Beta
 	body, _ := json.Marshal(map[string]any{"project_id": projB.ID})

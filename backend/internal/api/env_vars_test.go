@@ -4,14 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/api-sandbox-links/backend/internal/config"
 	"github.com/api-sandbox-links/backend/internal/db"
@@ -28,203 +27,49 @@ func withURLParam(req *http.Request, key, val string) *http.Request {
 }
 
 type mockEnvStore struct {
-	sandboxes   map[string]*db.Sandbox
-	envVars     map[string][]*db.EnvVar
-	userRoles   map[string]db.ProjectMemberRole
-	canManage   map[string]bool
-	auditEvents []*db.AuditEvent
+	*unifiedMockStore
+	userRoles map[string]db.ProjectMemberRole
+	canManage map[string]bool
 }
 
 func newMockEnvStore() *mockEnvStore {
 	return &mockEnvStore{
-		sandboxes: make(map[string]*db.Sandbox),
-		envVars:   make(map[string][]*db.EnvVar),
-		userRoles: make(map[string]db.ProjectMemberRole),
-		canManage: make(map[string]bool),
+		unifiedMockStore: newUnifiedMockStore(),
+		userRoles:        make(map[string]db.ProjectMemberRole),
+		canManage:        make(map[string]bool),
 	}
 }
 
-func (m *mockEnvStore) Ping(ctx context.Context) error { return nil }
-func (m *mockEnvStore) UpsertUser(u *db.User) error    { return nil }
-func (m *mockEnvStore) GetUserByGithubID(id int64) (*db.User, error) {
-	return &db.User{ID: "user-1", Username: "test"}, nil
-}
 func (m *mockEnvStore) GetUser(id string) (*db.User, error) {
+	if u, ok := m.users[id]; ok {
+		return u, nil
+	}
 	return &db.User{ID: id, Username: "test", GithubToken: []byte("token")}, nil
 }
-func (m *mockEnvStore) SearchUsers(q string, limit int) ([]*db.User, error) { return nil, nil }
+
 func (m *mockEnvStore) OwnsSandbox(sandboxID, userID string) (bool, error) {
-	return m.canManage[sandboxID+":"+userID], nil
-}
-func (m *mockEnvStore) GetSandbox(id string) (*db.Sandbox, error) {
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		return nil, gorm.ErrRecordNotFound
+	if cm, ok := m.canManage[sandboxID+":"+userID]; ok {
+		return cm, nil
 	}
-	return sb, nil
+	return m.unifiedMockStore.OwnsSandbox(sandboxID, userID)
 }
-func (m *mockEnvStore) GetSandboxBySubdomain(sub string) (*db.Sandbox, error) {
-	for _, sb := range m.sandboxes {
-		if sb.Subdomain == sub {
-			return sb, nil
-		}
-	}
-	return nil, gorm.ErrRecordNotFound
-}
-func (m *mockEnvStore) ListSandboxes(userID string) ([]*db.Sandbox, error) { return nil, nil }
-func (m *mockEnvStore) FindOrCreateRepository(u, c, d string) (*db.Repository, error) {
-	return &db.Repository{ID: "repo-1"}, nil
-}
-func (m *mockEnvStore) GetRepository(id string) (*db.Repository, error) {
-	return &db.Repository{ID: id}, nil
-}
-func (m *mockEnvStore) CreateSandbox(sb *db.Sandbox) error {
-	m.sandboxes[sb.ID] = sb
-	return nil
-}
-func (m *mockEnvStore) CreateSandboxWithinLimits(sb *db.Sandbox, u string, maxA, maxR int) error {
-	m.sandboxes[sb.ID] = sb
-	return nil
-}
-func (m *mockEnvStore) CreateSandboxWithProject(sb *db.Sandbox, ownerUserID, projectID string, maxActive, maxRunning int) error {
-	m.sandboxes[sb.ID] = sb
-	return nil
-}
-func (m *mockEnvStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
-	return map[string]string{}, nil
-}
-func (m *mockEnvStore) UpsertEnvVar(sandboxID, key string, value []byte, aiSuggested bool) error {
-	vars := m.envVars[sandboxID]
-	for _, v := range vars {
-		if v.Key == key {
-			v.Value = value
-			v.UpdatedAt = time.Now()
-			return nil
-		}
-	}
-	m.envVars[sandboxID] = append(m.envVars[sandboxID], &db.EnvVar{
-		ID:            "var-" + key,
-		SandboxID:     sandboxID,
-		Key:           key,
-		Value:         value,
-		IsAISuggested: aiSuggested,
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-	})
-	return nil
-}
-func (m *mockEnvStore) GetEnvVar(sandboxID, key string) (*db.EnvVar, error) {
-	for _, v := range m.envVars[sandboxID] {
-		if v.Key == key {
-			return v, nil
-		}
-	}
-	return nil, gorm.ErrRecordNotFound
-}
-func (m *mockEnvStore) DeleteEnvVar(sandboxID, key string) error {
-	vars := m.envVars[sandboxID]
-	var updated []*db.EnvVar
-	for _, v := range vars {
-		if v.Key != key {
-			updated = append(updated, v)
-		}
-	}
-	m.envVars[sandboxID] = updated
-	return nil
-}
-func (m *mockEnvStore) DeleteAllEnvVars(sandboxID string) error {
-	delete(m.envVars, sandboxID)
-	return nil
-}
-func (m *mockEnvStore) BulkUpsertEnvVars(sandboxID string, vars map[string][]byte, aiSuggested bool) error {
-	for k, val := range vars {
-		_ = m.UpsertEnvVar(sandboxID, k, val, aiSuggested)
-	}
-	return nil
-}
-func (m *mockEnvStore) ListEnvVars(sandboxID string) ([]*db.EnvVar, error) {
-	return m.envVars[sandboxID], nil
-}
+
 func (m *mockEnvStore) CanManageSecretsForSandbox(sandboxID, userID string) (bool, error) {
-	return m.canManage[sandboxID+":"+userID], nil
-}
-func (m *mockEnvStore) RecordFileEdit(sb, p, u string) error               { return nil }
-func (m *mockEnvStore) MarkFileEditsPushed(sb string) error                { return nil }
-func (m *mockEnvStore) ListSandboxDatabases(sb string) ([]*db.SandboxDatabase, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) UpdateSandbox(id string, f map[string]any) error        { return nil }
-func (m *mockEnvStore) RenameSandbox(sandboxID, newName string) (*db.Sandbox, error) {
-	if sb, ok := m.sandboxes[sandboxID]; ok {
-		sb.Name = newName
-		sb.Slug = "slug-" + newName
-		return sb, nil
+	if cm, ok := m.canManage[sandboxID+":"+userID]; ok {
+		return cm, nil
 	}
-	return nil, errors.New("sandbox not found")
+	return m.unifiedMockStore.CanManageSecretsForSandbox(sandboxID, userID)
 }
-func (m *mockEnvStore) ListDeployments(sb string) ([]*db.Deployment, error)    { return nil, nil }
-func (m *mockEnvStore) ListWarningThresholds(sb string) ([]string, error)      { return nil, nil }
-func (m *mockEnvStore) QueryResourceSnapshots(sb string, s, u time.Time, l int) ([]*db.ResourceSnapshot, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) UpdateLifecycleConfig(id string, it int, he, r int64) error { return nil }
-func (m *mockEnvStore) GetOrCreateDefaultProject(u string) (*db.Project, error)     { return nil, nil }
-func (m *mockEnvStore) CreateProject(p *db.Project, u string) (*db.Project, error)  { return nil, nil }
-func (m *mockEnvStore) GetProject(id string) (*db.Project, error)                   { return nil, nil }
-func (m *mockEnvStore) ListUserProjects(u string) ([]*db.Project, error)            { return nil, nil }
-func (m *mockEnvStore) UpdateProject(p, u, n, d string) (*db.Project, error)        { return nil, nil }
-func (m *mockEnvStore) DeleteProject(p, u string) error                             { return nil }
-func (m *mockEnvStore) AddProjectRepository(r *db.ProjectRepository) error         { return nil }
-func (m *mockEnvStore) ListProjectRepositories(p string) ([]*db.ProjectRepository, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) RemoveProjectRepository(p, r string) error { return nil }
-func (m *mockEnvStore) AssociateProjectSandbox(p, s string) error { return nil }
-func (m *mockEnvStore) DisassociateProjectSandbox(p, s string) error {
-	return nil
-}
-func (m *mockEnvStore) TransferSandbox(sandboxID, destinationProjectID, actorUserID string) error {
-	return nil
-}
-func (m *mockEnvStore) GetProjectIDForSandbox(s string) (string, error) { return "proj-1", nil }
-func (m *mockEnvStore) ListProjectSandboxes(p string) ([]*db.Sandbox, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) GetProjectRole(p, u string) (db.ProjectMemberRole, error) {
-	return db.ProjectMemberRoleOwner, nil
-}
-func (m *mockEnvStore) GetSandboxRole(s, u string) (db.ProjectMemberRole, error) {
-	if r, ok := m.userRoles[s+":"+u]; ok {
+
+func (m *mockEnvStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMemberRole, error) {
+	if r, ok := m.userRoles[sandboxID+":"+userID]; ok {
 		return r, nil
 	}
+	role, err := m.unifiedMockStore.GetSandboxRole(sandboxID, userID)
+	if err == nil {
+		return role, nil
+	}
 	return db.ProjectMemberRoleOwner, nil
-}
-func (m *mockEnvStore) ListProjectMembers(p string) ([]*db.ProjectMember, error) { return nil, nil }
-func (m *mockEnvStore) UpdateMemberRole(p, t string, r db.ProjectMemberRole, a string) error {
-	return nil
-}
-func (m *mockEnvStore) RemoveProjectMember(p, t, a string) error         { return nil }
-func (m *mockEnvStore) TransferProjectOwnership(p, n, c string) error    { return nil }
-func (m *mockEnvStore) CreateInvitation(i *db.ProjectInvitation) error   { return nil }
-func (m *mockEnvStore) GetInvitation(id string) (*db.ProjectInvitation, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) ListPendingProjectInvitations(p string) ([]*db.ProjectInvitation, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) ListUserInvitations(u string) ([]*db.ProjectInvitation, error) {
-	return nil, nil
-}
-func (m *mockEnvStore) AcceptInvitation(i, u string) error { return nil }
-func (m *mockEnvStore) RejectInvitation(i, u string) error { return nil }
-func (m *mockEnvStore) RevokeInvitation(i, a string) error { return nil }
-func (m *mockEnvStore) ResendInvitation(i, a string) error { return nil }
-func (m *mockEnvStore) RecordAuditEvent(e *db.AuditEvent) error {
-	m.auditEvents = append(m.auditEvents, e)
-	return nil
-}
-func (m *mockEnvStore) ListAuditEvents(p string, limit int) ([]*db.AuditEvent, error) {
-	return m.auditEvents, nil
 }
 
 func setupTestServer(t *testing.T) (*Server, *mockEnvStore, string) {
@@ -246,6 +91,7 @@ func setupTestServer(t *testing.T) (*Server, *mockEnvStore, string) {
 		store:          store,
 		box:            box,
 		workspaceLocks: workspacelock.NewManager(),
+		logger:         slog.Default(),
 	}
 
 	return s, store, workDir

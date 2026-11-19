@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,46 +24,23 @@ import (
 )
 
 type forkSyncStore struct {
-	Store // Embeds the interface; unused methods remain unimplemented.
-
-	mu               sync.RWMutex
-	sandboxes        map[string]*db.Sandbox
-	repositories     map[string]*db.Repository
-	projectSandboxes map[string]string
+	*unifiedMockStore
 }
 
 func newForkSyncStore(user *db.User, parent *db.Sandbox) *forkSyncStore {
 	parent.RepositoryID = "repo-sync-1"
-
-	return &forkSyncStore{
-		sandboxes: map[string]*db.Sandbox{
-			parent.ID: parent,
-		},
-		repositories: map[string]*db.Repository{
-			parent.RepositoryID: {
-				ID:     parent.RepositoryID,
-				UserID: user.ID,
-			},
-		},
-		projectSandboxes: make(map[string]string),
+	s := &forkSyncStore{
+		unifiedMockStore: newUnifiedMockStore(),
 	}
-}
-
-func (s *forkSyncStore) OwnsSandbox(sandboxID, userID string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	sb, ok := s.sandboxes[sandboxID]
-	if !ok {
-		return false, nil
+	s.sandboxes[parent.ID] = parent
+	s.repositories[parent.RepositoryID] = &db.Repository{
+		ID:            parent.RepositoryID,
+		UserID:        user.ID,
+		GithubURL:     "https://github.com/test/repo",
+		DefaultBranch: "main",
 	}
-
-	repo, ok := s.repositories[sb.RepositoryID]
-	if !ok {
-		return false, nil
-	}
-
-	return repo.UserID == userID, nil
+	s.users[user.ID] = user
+	return s
 }
 
 func (s *forkSyncStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMemberRole, error) {
@@ -70,147 +48,7 @@ func (s *forkSyncStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMemb
 	if err == nil && owns {
 		return db.ProjectMemberRoleOwner, nil
 	}
-	return "", errors.New("not authorized")
-}
-
-func (s *forkSyncStore) GetSandbox(id string) (*db.Sandbox, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	sb, ok := s.sandboxes[id]
-	if !ok {
-		return nil, fmt.Errorf("sandbox %s not found", id)
-	}
-	cp := *sb
-	return &cp, nil
-}
-
-func (s *forkSyncStore) GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, sb := range s.sandboxes {
-		if sb.Subdomain == subdomain {
-			cp := *sb
-			return &cp, nil
-		}
-	}
-
-	return nil, fmt.Errorf("sandbox subdomain %s not found", subdomain)
-}
-
-func (s *forkSyncStore) CreateSandboxWithinLimits(
-	sb *db.Sandbox,
-	userID string,
-	maxActive, maxRunning int,
-) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	repo, ok := s.repositories[sb.RepositoryID]
-	if !ok || repo.UserID != userID {
-		return errors.New("repository ownership mismatch")
-	}
-
-	cp := *sb
-	s.sandboxes[sb.ID] = &cp
-	return nil
-}
-
-func (s *forkSyncStore) CreateSandboxWithProject(
-	sb *db.Sandbox,
-	userID string,
-	projectID string,
-	maxActive, maxRunning int,
-) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	cp := *sb
-	s.sandboxes[sb.ID] = &cp
-	if projectID != "" {
-		s.projectSandboxes[sb.ID] = projectID
-	}
-	return nil
-}
-
-func (s *forkSyncStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[string]string)
-	for _, id := range sandboxIDs {
-		if pid, ok := s.projectSandboxes[id]; ok {
-			out[id] = pid
-		}
-	}
-	return out, nil
-}
-
-func (s *forkSyncStore) GetRepository(id string) (*db.Repository, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	repo, ok := s.repositories[id]
-	if !ok {
-		return nil, fmt.Errorf("repository %s not found", id)
-	}
-	return repo, nil
-}
-
-func (s *forkSyncStore) RecordFileEdit(sandboxID, relPath, userID string) error {
-	return nil
-}
-
-func (s *forkSyncStore) ListSandboxDatabases(
-	sandboxID string,
-) ([]*db.SandboxDatabase, error) {
-	return nil, nil
-}
-
-func (s *forkSyncStore) UpdateSandbox(id string, fields map[string]any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sb, ok := s.sandboxes[id]
-	if !ok {
-		return fmt.Errorf("sandbox %s not found", id)
-	}
-
-	if status, ok := fields["status"].(string); ok {
-		sb.Status = db.SandboxStatus(status)
-	}
-
-	return nil
-}
-
-func (s *forkSyncStore) GetProjectIDForSandbox(sandboxID string) (string, error) {
-	return "test-project-1", nil
-}
-
-func (s *forkSyncStore) GetProjectRole(projectID, userID string) (db.ProjectMemberRole, error) {
-	return db.ProjectMemberRoleOwner, nil
-}
-
-func (s *forkSyncStore) GetOrCreateDefaultProject(userID string) (*db.Project, error) {
-	return &db.Project{ID: "test-default-project", Name: "Default Workspace", CreatedBy: userID}, nil
-}
-
-func (s *forkSyncStore) AssociateProjectSandbox(projectID, sandboxID string) error {
-	return nil
-}
-
-func (s *forkSyncStore) RenameSandbox(sandboxID, newName string) (*db.Sandbox, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if sb, ok := s.sandboxes[sandboxID]; ok {
-		sb.Name = newName
-		return sb, nil
-	}
-	return nil, errors.New("sandbox not found")
-}
-
-func (s *forkSyncStore) AddProjectRepository(repo *db.ProjectRepository) error {
-	return nil
+	return s.unifiedMockStore.GetSandboxRole(sandboxID, userID)
 }
 
 func setupForkSyncServer(t *testing.T) (*Server, string, *db.User, *db.Sandbox) {
@@ -263,6 +101,7 @@ func setupForkSyncServer(t *testing.T) (*Server, string, *db.User, *db.Sandbox) 
 		forkHooks:      &forkHooks{},
 		bgCtx:          bgCtx,
 		bgCancel:       bgCancel,
+		logger:         slog.Default(),
 	}
 
 	return srv, workRoot, user, parent

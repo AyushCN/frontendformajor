@@ -17,41 +17,24 @@ import (
 )
 
 type mockCoWStore struct {
-	Store
-	sandboxes        map[string]*db.Sandbox
-	ownership        map[string]string            // sandboxID -> userID
-	sandboxRoles     map[string]map[string]db.ProjectMemberRole // sandboxID -> userID -> role
-	projectSandboxes map[string]string            // sandboxID -> projectID
+	*unifiedMockStore
+	ownership    map[string]string                          // sandboxID -> userID
+	sandboxRoles map[string]map[string]db.ProjectMemberRole // sandboxID -> userID -> role
 }
 
 func newMockCoWStore() *mockCoWStore {
 	return &mockCoWStore{
-		sandboxes:        make(map[string]*db.Sandbox),
+		unifiedMockStore: newUnifiedMockStore(),
 		ownership:        make(map[string]string),
 		sandboxRoles:     make(map[string]map[string]db.ProjectMemberRole),
-		projectSandboxes: make(map[string]string),
 	}
-}
-
-func (m *mockCoWStore) GetSandbox(id string) (*db.Sandbox, error) {
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		return nil, errorsNew("sandbox not found")
-	}
-	return sb, nil
-}
-
-func (m *mockCoWStore) GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error) {
-	for _, sb := range m.sandboxes {
-		if sb.Subdomain == subdomain {
-			return sb, nil
-		}
-	}
-	return nil, errorsNew("not found")
 }
 
 func (m *mockCoWStore) OwnsSandbox(sandboxID, userID string) (bool, error) {
-	return m.ownership[sandboxID] == userID, nil
+	if owner, ok := m.ownership[sandboxID]; ok {
+		return owner == userID, nil
+	}
+	return m.unifiedMockStore.OwnsSandbox(sandboxID, userID)
 }
 
 func (m *mockCoWStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMemberRole, error) {
@@ -60,66 +43,26 @@ func (m *mockCoWStore) GetSandboxRole(sandboxID, userID string) (db.ProjectMembe
 			return r, nil
 		}
 	}
-	return "", errorsNew("forbidden")
+	return m.unifiedMockStore.GetSandboxRole(sandboxID, userID)
 }
 
 func (m *mockCoWStore) CreateSandboxWithinLimits(sb *db.Sandbox, ownerUserID string, maxPerUser, maxTotal int) error {
-	m.sandboxes[sb.ID] = sb
 	m.ownership[sb.ID] = ownerUserID
 	if _, ok := m.sandboxRoles[sb.ID]; !ok {
 		m.sandboxRoles[sb.ID] = make(map[string]db.ProjectMemberRole)
 	}
 	m.sandboxRoles[sb.ID][ownerUserID] = db.ProjectMemberRoleOwner
-	return nil
+	return m.unifiedMockStore.CreateSandboxWithinLimits(sb, ownerUserID, maxPerUser, maxTotal)
 }
 
 func (m *mockCoWStore) CreateSandboxWithProject(sb *db.Sandbox, ownerUserID, projectID string, maxPerUser, maxTotal int) error {
-	m.sandboxes[sb.ID] = sb
 	m.ownership[sb.ID] = ownerUserID
 	if _, ok := m.sandboxRoles[sb.ID]; !ok {
 		m.sandboxRoles[sb.ID] = make(map[string]db.ProjectMemberRole)
 	}
 	m.sandboxRoles[sb.ID][ownerUserID] = db.ProjectMemberRoleOwner
-	if projectID != "" {
-		m.projectSandboxes[sb.ID] = projectID
-	}
-	return nil
+	return m.unifiedMockStore.CreateSandboxWithProject(sb, ownerUserID, projectID, maxPerUser, maxTotal)
 }
-
-func (m *mockCoWStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
-	out := make(map[string]string)
-	for _, id := range sandboxIDs {
-		if pid, ok := m.projectSandboxes[id]; ok {
-			out[id] = pid
-		}
-	}
-	return out, nil
-}
-
-func (m *mockCoWStore) GetProjectIDForSandbox(sandboxID string) (string, error) {
-	pID, ok := m.projectSandboxes[sandboxID]
-	if !ok {
-		return "", errorsNew("not found")
-	}
-	return pID, nil
-}
-
-func (m *mockCoWStore) AssociateProjectSandbox(projectID, sandboxID string) error {
-	m.projectSandboxes[sandboxID] = projectID
-	return nil
-}
-
-func (m *mockCoWStore) RecordAuditEvent(event *db.AuditEvent) error {
-	return nil
-}
-
-func errorsNew(msg string) error {
-	return &customErr{msg}
-}
-
-type customErr struct{ msg string }
-
-func (e *customErr) Error() string { return e.msg }
 
 func TestEditorModifySharedSandboxTriggersCopyOnWrite(t *testing.T) {
 	workDir := t.TempDir()

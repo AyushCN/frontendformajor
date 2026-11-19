@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -109,7 +110,7 @@ func TestHandleRenameSandbox(t *testing.T) {
 	store.sandboxes[sb.ID] = sb
 	store.sbProjects[sb.ID] = proj.ID
 
-	s := &Server{store: store}
+	s := &Server{store: store, logger: slog.Default()}
 	r := chi.NewRouter()
 	r.Post("/api/sandboxes/{id}/rename", s.handleRenameSandbox)
 
