@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/config"
@@ -178,7 +179,7 @@ type RunOptions struct {
 	NetworkName  string            // private per-sandbox network
 	Labels       map[string]string // extra labels (traefik, provenance)
 	User         string
-	Command      []string          // optional start command override
+	Command      []string // optional start command override
 }
 
 // RunResult reports where the container landed so callers can store it.
@@ -399,6 +400,8 @@ func (o *Orchestrator) WaitHealthy(ctx context.Context, containerID, ip string, 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	client := &http.Client{Timeout: 2 * time.Second}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -406,12 +409,26 @@ func (o *Orchestrator) WaitHealthy(ctx context.Context, containerID, ip string, 
 		case <-ticker.C:
 		}
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, itoa(port)), 2*time.Second)
+		if err != nil {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("orchestrator: container %s not healthy after %s (last err: %v)", containerID, timeout, err)
+			}
+			continue
+		}
+		conn.Close()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/", net.JoinHostPort(ip, itoa(port))), nil)
 		if err == nil {
-			conn.Close()
-			return nil
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+					return nil
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("orchestrator: container %s not healthy after %s (last err: %v)", containerID, timeout, err)
+			return fmt.Errorf("orchestrator: container %s did not become HTTP-ready after %s", containerID, timeout)
 		}
 	}
 }

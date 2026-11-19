@@ -1,10 +1,38 @@
 package orchestrator
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/api-sandbox-links/backend/internal/config"
 )
+
+func TestWaitHealthyRequiresSuccessfulHTTPResponse(t *testing.T) {
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if probes.Add(1) <= 2 {
+			http.Error(w, "not ready", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	hostPort := server.Listener.Addr().(*net.TCPAddr)
+	o := &Orchestrator{}
+	err := o.WaitHealthy(context.Background(), "test-container", "127.0.0.1", hostPort.Port, 3*time.Second)
+	if err != nil {
+		t.Fatalf("WaitHealthy returned error after HTTP became ready: %v", err)
+	}
+	if probes.Load() < 3 {
+		t.Fatalf("expected HTTP readiness polling, got %d probe(s)", probes.Load())
+	}
+}
 
 func TestSandboxHostConfigIsolationDefaults(t *testing.T) {
 	cfg := &config.Config{
