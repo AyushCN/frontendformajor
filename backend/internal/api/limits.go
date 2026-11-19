@@ -18,7 +18,7 @@ import (
 const defaultMaxActiveSandboxes = 3
 
 func (s *Server) maxActiveSandboxes() int {
-	if s.cfg.MaxActiveSandboxesPerUser >= 1 {
+	if s.cfg != nil && s.cfg.MaxActiveSandboxesPerUser >= 1 {
 		return s.cfg.MaxActiveSandboxesPerUser
 	}
 	return defaultMaxActiveSandboxes
@@ -28,7 +28,10 @@ func (s *Server) maxActiveSandboxes() int {
 // programmatically built Configs (test harnesses); config.Load always sets a
 // positive default (6) and rejects an explicit zero, so production is capped.
 func (s *Server) maxRunningSandboxes() int {
-	return s.cfg.MaxRunningSandboxes
+	if s.cfg != nil {
+		return s.cfg.MaxRunningSandboxes
+	}
+	return 0
 }
 
 // writeSandboxQuotaExceeded reports quota exhaustion. 409 Conflict: the

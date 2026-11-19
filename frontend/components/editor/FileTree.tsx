@@ -8,12 +8,14 @@ import {
   ChevronRight,
   ChevronDown,
   Trash2,
+  Lock,
 } from "lucide-react";
 
 export interface FileNode {
   name: string;
   path: string;
   isDir: boolean;
+  protected?: boolean;
   children?: FileNode[];
 }
 
@@ -88,10 +90,19 @@ export function FileTreeItem({
             : "text-on-surface-variant hover:text-on-surface"
         }`}
       >
-        <File
-          className={`w-3.5 h-3.5 shrink-0 ${isSelected ? "text-primary-fixed" : "text-on-surface-variant/70"}`}
-        />
+        {node.protected ? (
+          <Lock className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+        ) : (
+          <File
+            className={`w-3.5 h-3.5 shrink-0 ${isSelected ? "text-primary-fixed" : "text-on-surface-variant/70"}`}
+          />
+        )}
         <span className="truncate">{node.name}</span>
+        {node.protected && (
+          <span className="text-[10px] uppercase font-mono px-1 py-0.2 rounded bg-amber-500/10 text-amber-500 border border-amber-500/20 ml-1">
+            secret
+          </span>
+        )}
       </button>
       <button
         onClick={(e) => onDelete(node.path, e)}

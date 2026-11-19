@@ -180,7 +180,8 @@ type RunOptions struct {
 	NetworkName  string            // private per-sandbox network
 	Labels       map[string]string // extra labels (traefik, provenance)
 	User         string
-	Command      []string // optional start command override
+	Command      []string       // optional start command override
+	Mounts       []runtime.Mount // bind or volume mounts (dev-preview path)
 }
 
 // RunResult reports where the container landed so callers can store it.
@@ -277,6 +278,14 @@ func (o *Orchestrator) RunSandbox(ctx context.Context, opts RunOptions) (*RunRes
 				"/run": "rw,noexec,nosuid,size=16m",
 			}
 		}
+		// Apply bind/volume mounts supplied by the caller (dev-preview path).
+		// A workspace bind mount is incompatible with ReadonlyRootfs because
+		// language runtimes (Flask reloader, go run, etc.) write restart markers
+		// and pip packages to the container's own writable layer.
+		if len(opts.Mounts) > 0 {
+			spec.Mounts = opts.Mounts
+			spec.ReadonlyRootfs = false
+		}
 		info, err := o.runner.Create(ctx, spec)
 		if err != nil {
 			return nil, fmt.Errorf("orchestrator: creating sandbox container: %w", err)
@@ -299,7 +308,25 @@ func (o *Orchestrator) RunSandbox(ctx context.Context, opts RunOptions) (*RunRes
 	if opts.User != "" {
 		cc.User = opts.User
 	}
+	if len(opts.Command) > 0 {
+		cc.Cmd = opts.Command
+	}
 	hc := sandboxHostConfig(o.cfg)
+	// Apply bind/volume mounts supplied by the caller (dev-preview path).
+	// A workspace bind mount is incompatible with ReadonlyRootfs because language
+	// runtimes (Flask reloader, go run, etc.) write to the container's own layer.
+	if len(opts.Mounts) > 0 {
+		hc.ReadonlyRootfs = false
+		for _, m := range opts.Mounts {
+			if m.Type == "bind" {
+				bindStr := m.Source + ":" + m.Target
+				if m.ReadOnly {
+					bindStr += ":ro"
+				}
+				hc.Binds = append(hc.Binds, bindStr)
+			}
+		}
+	}
 	nc := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
 			netName(opts.SandboxID): {NetworkID: ""},

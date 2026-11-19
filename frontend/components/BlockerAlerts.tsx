@@ -99,7 +99,7 @@ export default function BlockerAlerts({ branches, blockers }: BlockerAlertsProps
                   <div className="flex items-center gap-2">
                     <span className="font-mono font-bold text-primary-fixed">{branch.name}</span>
                     <span className="text-xs text-on-surface-variant/50">in</span>
-                    <Link href={`/environments/${branch.environment_id}`} className="text-xs font-semibold text-on-surface hover:text-primary-fixed underline decoration-on-surface-variant/30 underline-offset-2">
+                    <Link href={`/sandboxes/${branch.environment_id}`} className="text-xs font-semibold text-on-surface hover:text-primary-fixed underline decoration-on-surface-variant/30 underline-offset-2">
                       {branch.environment_name}
                     </Link>
                   </div>

@@ -2,9 +2,17 @@
 
 import { useState, useEffect, useRef } from "react";
 import useSWR from "swr";
-import { GitBranch, Loader2, Save, X, Plus, Check, DownloadCloud, UploadCloud, RefreshCw, GitCommit, Clock, User } from "lucide-react";
+import { GitBranch, Loader2, Save, X, Plus, Check, DownloadCloud, UploadCloud, RefreshCw, GitCommit, Clock, User, ShieldAlert } from "lucide-react";
 import toast from "react-hot-toast";
 import { fetchWithAuth } from "@/lib/auth";
+
+export interface CommitViolation {
+  file: string;
+  type: string;
+  message: string;
+  is_tracked: boolean;
+  remediation: string;
+}
 
 export function CommitModal({
   isOpen,
@@ -13,7 +21,10 @@ export function CommitModal({
   onCommitAndPush,
   isCommitting,
   isPushing,
-  hasUncommittedChanges
+  hasUncommittedChanges,
+  violations,
+  onUntrack,
+  isUntracking,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -22,6 +33,9 @@ export function CommitModal({
   isCommitting: boolean;
   isPushing: boolean;
   hasUncommittedChanges: boolean;
+  violations?: CommitViolation[];
+  onUntrack?: (path: string) => Promise<void>;
+  isUntracking?: boolean;
 }) {
   const [message, setMessage] = useState("");
 
@@ -41,6 +55,33 @@ export function CommitModal({
         </div>
         
         <div className="p-4 flex flex-col gap-4">
+          {violations && violations.length > 0 && (
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl space-y-2">
+              <div className="flex items-center gap-2 text-red-500 font-semibold text-xs uppercase tracking-wide">
+                <ShieldAlert className="w-4 h-4" />
+                Commit Blocked: Secret Protection
+              </div>
+              {violations.map((v, i) => (
+                <div key={i} className="text-xs space-y-1">
+                  <p className="font-mono text-red-400 font-semibold">{v.file}</p>
+                  <p className="text-on-surface-variant text-[11px]">{v.message}</p>
+                  <p className="text-on-surface-variant/80 text-[11px] italic">{v.remediation}</p>
+                  {onUntrack && (
+                    <button
+                      type="button"
+                      disabled={isUntracking}
+                      onClick={() => onUntrack(v.file)}
+                      className="mt-1 px-2.5 py-1 text-[11px] font-semibold bg-red-500/20 text-red-300 hover:bg-red-500/30 rounded-md border border-red-500/30 transition-colors flex items-center gap-1.5"
+                    >
+                      {isUntracking ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                      <span>Untrack {v.file} from Git</span>
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           {!hasUncommittedChanges && (
             <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-600 dark:text-amber-400 text-sm">
               Warning: You have no uncommitted changes detected.

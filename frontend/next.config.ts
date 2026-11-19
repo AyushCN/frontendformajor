@@ -14,7 +14,20 @@ const nextConfig: NextConfig = {
   async rewrites() {
     const backend = process.env.BACKEND_URL || 'http://localhost:8080';
     return {
-      beforeFiles: [],
+      beforeFiles: [
+        {
+          source: '/api/sandboxes/:id/:path*',
+          destination: '/api/environments/:id/:path*',
+        },
+        {
+          source: '/api/sandboxes/:id',
+          destination: '/api/environments/:id',
+        },
+        {
+          source: '/api/sandboxes',
+          destination: '/api/environments',
+        },
+      ],
       afterFiles: [],
       fallback: [
         {
@@ -32,6 +45,14 @@ const nextConfig: NextConfig = {
         {
           source: '/api/environments/:id/commit',
           destination: `${backend}/api/sandboxes/:id/commit`,
+        },
+        {
+          source: '/api/environments/:id/transfer',
+          destination: `${backend}/api/sandboxes/:id/transfer`,
+        },
+        {
+          source: '/api/environments/:id/rename',
+          destination: `${backend}/api/sandboxes/:id/rename`,
         },
         {
           source: '/api/environments/:id/fork',

@@ -36,10 +36,13 @@ const (
 
 // createSandboxRequest is the body of POST /api/sandboxes.
 type createSandboxRequest struct {
+	Name               string                        `json:"name"`
 	RepoURL            string                        `json:"repo_url"`
 	Branch             string                        `json:"branch"`
 	LifetimeSeconds    int64                         `json:"lifetime_seconds"`
 	IdleTimeoutSeconds int                           `json:"idle_timeout_seconds"`
+	ProjectID          string                        `json:"project_id"`
+	ProjectIDCamel     string                        `json:"projectId"`
 	Database           string                        `json:"database"` // auto | postgres | mysql | none
 	EnvVars            map[string]string             `json:"env_vars"`
 	BuildConfig        *orchestrator.UserBuildConfig `json:"build_config"`
@@ -59,9 +62,22 @@ func (s *Server) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not list sandboxes")
 		return
 	}
+
+	ids := make([]string, len(rows))
+	for i, sb := range rows {
+		ids[i] = sb.ID
+	}
+	var projectMap map[string]string
+	if s.store != nil && len(ids) > 0 {
+		projectMap, _ = s.store.GetProjectIDsForSandboxes(ids)
+	}
+	if projectMap == nil {
+		projectMap = make(map[string]string)
+	}
+
 	out := make([]map[string]any, 0, len(rows))
 	for _, sb := range rows {
-		out = append(out, s.sandboxJSON(sb))
+		out = append(out, s.sandboxJSONWithProject(sb, projectMap[sb.ID]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sandboxes": out})
 }
@@ -82,6 +98,10 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RepoURL == "" {
 		writeErr(w, http.StatusBadRequest, "repo_url is required")
+		return
+	}
+	if req.ProjectID != "" && req.ProjectIDCamel != "" && req.ProjectID != req.ProjectIDCamel {
+		writeErr(w, http.StatusBadRequest, "conflicting project_id and projectId provided")
 		return
 	}
 	info, err := git.ParseGitHubURL(req.RepoURL)
@@ -111,6 +131,30 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		branch = info.DefaultBranch
 	}
 
+	targetProjectID := strings.TrimSpace(req.ProjectID)
+	if targetProjectID == "" {
+		targetProjectID = strings.TrimSpace(req.ProjectIDCamel)
+	}
+	if targetProjectID != "" {
+		proj, err := s.store.GetProject(targetProjectID)
+		if err != nil || proj == nil {
+			writeErr(w, http.StatusNotFound, "project not found")
+			return
+		}
+		role, err := s.store.GetProjectRole(targetProjectID, user.ID)
+		if err != nil || (role != db.ProjectMemberRoleOwner && role != db.ProjectMemberRoleEditor) {
+			writeErr(w, http.StatusForbidden, "insufficient project permissions")
+			return
+		}
+	} else {
+		defProj, err := s.store.GetOrCreateDefaultProject(user.ID)
+		if err != nil || defProj == nil {
+			writeErr(w, http.StatusInternalServerError, "could not resolve default project")
+			return
+		}
+		targetProjectID = defProj.ID
+	}
+
 	repo, err := s.store.FindOrCreateRepository(user.ID, info.CloneURL, info.DefaultBranch)
 	if err != nil {
 		s.logger.Warn("repository lookup failed", slog.String("err", err.Error()))
@@ -118,7 +162,22 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subdomain, err := s.uniqueSubdomain(info.Name)
+	displayName := strings.TrimSpace(req.Name)
+	if displayName == "" {
+		displayName = info.Name
+	}
+	slug := db.NormalizeSlug(displayName)
+	if slug == "" {
+		slug = db.NormalizeSlug(info.Name)
+		if slug == "" {
+			slug = "sandbox"
+		}
+	}
+
+	sandboxID := uuid.NewString()
+	shortID := strings.ReplaceAll(sandboxID, "-", "")[:6]
+
+	subdomain, err := s.uniqueSubdomain(slug, shortID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not allocate subdomain")
 		return
@@ -132,7 +191,9 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sandbox := &db.Sandbox{
-		ID:                 uuid.NewString(),
+		ID:                 sandboxID,
+		Name:               displayName,
+		Slug:               slug,
 		RepositoryID:       repo.ID,
 		BranchName:         branch,
 		Subdomain:          subdomain,
@@ -143,7 +204,7 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:          now,
 		BuildConfig:        initialBuildConfig,
 	}
-	if err := s.store.CreateSandboxWithinLimits(sandbox, user.ID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
+	if err := s.store.CreateSandboxWithProject(sandbox, user.ID, targetProjectID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
 		if errors.Is(err, db.ErrSandboxQuotaExceeded) {
 			s.writeSandboxQuotaExceeded(w)
 			return
@@ -156,6 +217,16 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not create sandbox")
 		return
 	}
+
+	_ = s.store.AddProjectRepository(&db.ProjectRepository{
+		ID:            uuid.NewString(),
+		ProjectID:     targetProjectID,
+		Name:          info.Name,
+		GitURL:        info.CloneURL,
+		DefaultBranch: info.DefaultBranch,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	})
 
 	// Persist any user-supplied env vars (encrypted immediately).
 	for key, value := range req.EnvVars {
@@ -175,12 +246,16 @@ func (s *Server) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), orchestrator.DeployTimeout)
 		defer cancel()
-		if err := s.deployer.DeploySandbox(ctx, sandbox, opts); err != nil {
-			s.logger.Warn("deploy failed", slog.String("sandbox", sandbox.ID), slog.String("err", err.Error()))
+		if s.deployer != nil {
+			if err := s.deployer.DeploySandbox(ctx, sandbox, opts); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("deploy failed", slog.String("sandbox", sandbox.ID), slog.String("err", err.Error()))
+				}
+			}
 		}
 	}()
 
-	writeJSON(w, http.StatusAccepted, s.sandboxJSON(sandbox))
+	writeJSON(w, http.StatusAccepted, s.sandboxJSONWithProject(sandbox, targetProjectID))
 }
 
 // handleGetSandbox returns one sandbox's current state.
@@ -190,6 +265,124 @@ func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.sandboxJSON(sb))
+}
+
+// handleTransferSandbox moves a sandbox to a destination project.
+func (s *Server) handleTransferSandbox(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sandboxID := chi.URLParam(r, "id")
+	if strings.TrimSpace(sandboxID) == "" {
+		writeErr(w, http.StatusBadRequest, "sandbox id required")
+		return
+	}
+
+	var req struct {
+		ProjectID      string `json:"project_id"`
+		ProjectIDCamel string `json:"projectId"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID != "" && req.ProjectIDCamel != "" && req.ProjectID != req.ProjectIDCamel {
+		writeErr(w, http.StatusBadRequest, "conflicting project_id and projectId provided")
+		return
+	}
+	destProjectID := strings.TrimSpace(req.ProjectID)
+	if destProjectID == "" {
+		destProjectID = strings.TrimSpace(req.ProjectIDCamel)
+	}
+	if destProjectID == "" {
+		writeErr(w, http.StatusBadRequest, "destination projectId is required")
+		return
+	}
+
+	if err := s.store.TransferSandbox(sandboxID, destProjectID, user.ID); err != nil {
+		s.logger.Warn("sandbox transfer failed",
+			slog.String("sandbox", sandboxID),
+			slog.String("destination_project", destProjectID),
+			slog.String("err", err.Error()),
+		)
+		if strings.Contains(err.Error(), "access denied") {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "missing project association") || strings.Contains(err.Error(), "cannot transfer a destroyed") {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sb, err := s.store.GetSandbox(sandboxID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message":    "Sandbox transferred successfully",
+			"project_id": destProjectID,
+			"projectId":  destProjectID,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":    "Sandbox transferred successfully",
+		"project_id": destProjectID,
+		"projectId":  destProjectID,
+		"sandbox":    s.sandboxJSONWithProject(sb, destProjectID),
+	})
+}
+
+// handleRenameSandbox handles renaming a sandbox display name and updating its routing.
+func (s *Server) handleRenameSandbox(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sandboxID := chi.URLParam(r, "id")
+	if strings.TrimSpace(sandboxID) == "" {
+		writeErr(w, http.StatusBadRequest, "sandbox id is required")
+		return
+	}
+
+	sb, authorized := s.requireSandboxRole(w, r, db.ProjectMemberRoleEditor)
+	if !authorized {
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	newName := strings.TrimSpace(req.Name)
+	if newName == "" {
+		writeErr(w, http.StatusBadRequest, "sandbox name cannot be empty")
+		return
+	}
+
+	updated, err := s.store.RenameSandbox(sb.ID, newName)
+	if err != nil {
+		s.logger.Warn("sandbox rename failed", slog.String("sandbox", sb.ID), slog.String("err", err.Error()))
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Sandbox renamed successfully",
+		"sandbox": s.sandboxJSON(updated),
+	})
 }
 
 // --- helpers -------------------------------------------------------------
@@ -285,13 +478,27 @@ func (s *Server) requireSandboxRoleForMutation(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) createCopyOnWriteFork(ctx context.Context, parent *db.Sandbox, user *db.User) (*db.Sandbox, error) {
-	subdomain := "cow-" + parent.Subdomain
+	parentName := parent.Name
+	if parentName == "" {
+		parentName = parent.Subdomain
+	}
+	childName := fmt.Sprintf("%s (CoW Fork)", parentName)
+	childSlug := db.NormalizeSlug(childName)
+	if childSlug == "" {
+		childSlug = "cow-fork"
+	}
+	childID := uuid.NewString()
+	shortID := strings.ReplaceAll(childID, "-", "")[:6]
+
+	var subdomain string
 	var err error
 	if s.store != nil {
-		subdomain, err = s.uniqueSubdomain(subdomain)
+		subdomain, err = s.uniqueSubdomain(childSlug, shortID)
 		if err != nil {
 			return nil, fmt.Errorf("allocating subdomain: %w", err)
 		}
+	} else {
+		subdomain = fmt.Sprintf("%s-%s", childSlug, shortID)
 	}
 
 	remaining := time.Until(parent.ExpiresAt)
@@ -305,7 +512,9 @@ func (s *Server) createCopyOnWriteFork(ctx context.Context, parent *db.Sandbox, 
 
 	now := time.Now().UTC()
 	child := &db.Sandbox{
-		ID:                 uuid.NewString(),
+		ID:                 childID,
+		Name:               childName,
+		Slug:               childSlug,
 		RepositoryID:       parent.RepositoryID,
 		ParentSandboxID:    &parent.ID,
 		BranchName:         parent.BranchName,
@@ -318,11 +527,14 @@ func (s *Server) createCopyOnWriteFork(ctx context.Context, parent *db.Sandbox, 
 	}
 
 	if s.store != nil {
-		if err := s.store.CreateSandboxWithinLimits(child, user.ID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
-			return nil, fmt.Errorf("creating sandbox within limits: %w", err)
+		targetProjectID, _ := s.store.GetProjectIDForSandbox(parent.ID)
+		if targetProjectID == "" {
+			if defProj, err := s.store.GetOrCreateDefaultProject(user.ID); err == nil && defProj != nil {
+				targetProjectID = defProj.ID
+			}
 		}
-		if projectID, pErr := s.store.GetProjectIDForSandbox(parent.ID); pErr == nil && projectID != "" {
-			_ = s.store.AssociateProjectSandbox(projectID, child.ID)
+		if err := s.store.CreateSandboxWithProject(child, user.ID, targetProjectID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
+			return nil, fmt.Errorf("creating sandbox within limits: %w", err)
 		}
 		_ = s.store.RecordAuditEvent(&db.AuditEvent{
 			ID:        uuid.NewString(),
@@ -347,20 +559,54 @@ func (s *Server) createCopyOnWriteFork(ctx context.Context, parent *db.Sandbox, 
 
 // sandboxJSON renders a sandbox row plus computed fields the UI needs.
 func (s *Server) sandboxJSON(sb *db.Sandbox) map[string]any {
+	var projectID string
+	if s.store != nil {
+		func() {
+			defer func() { _ = recover() }()
+			if pid, err := s.store.GetProjectIDForSandbox(sb.ID); err == nil && pid != "" {
+				projectID = pid
+			}
+		}()
+	}
+	return s.sandboxJSONWithProject(sb, projectID)
+}
+
+// sandboxJSONWithProject renders a sandbox row with an explicit authoritative project association.
+func (s *Server) sandboxJSONWithProject(sb *db.Sandbox, projectID string) map[string]any {
 	var dbEngine string
 	if s.store != nil {
-		if dbs, err := s.store.ListSandboxDatabases(sb.ID); err == nil && len(dbs) > 0 {
-			dbEngine = dbs[0].Engine
-		}
+		func() {
+			defer func() { _ = recover() }()
+			if dbs, err := s.store.ListSandboxDatabases(sb.ID); err == nil && len(dbs) > 0 {
+				dbEngine = dbs[0].Engine
+			}
+		}()
 	}
 
-	sandboxURL := "http://" + sb.Subdomain + "." + s.cfg.SandboxBaseDomain
-	if s.cfg.GatewayPort != 80 && s.cfg.GatewayPort != 443 && s.cfg.GatewayPort > 0 {
-		sandboxURL += fmt.Sprintf(":%d", s.cfg.GatewayPort)
+	var sandboxURL string
+	if s.cfg != nil {
+		sandboxURL = "http://" + sb.Subdomain + "." + s.cfg.SandboxBaseDomain
+		if s.cfg.GatewayPort != 80 && s.cfg.GatewayPort != 443 && s.cfg.GatewayPort > 0 {
+			sandboxURL += fmt.Sprintf(":%d", s.cfg.GatewayPort)
+		}
+	} else {
+		sandboxURL = "http://" + sb.Subdomain + ".sandbox.localhost"
+	}
+
+	displayName := sb.Name
+	if displayName == "" {
+		displayName = sb.Subdomain
+	}
+	if displayName == "" && len(sb.ID) >= 8 {
+		displayName = "sandbox-" + sb.ID[:8]
 	}
 
 	return map[string]any{
 		"id":                            sb.ID,
+		"name":                          displayName,
+		"slug":                          sb.Slug,
+		"project_id":                    projectID,
+		"projectId":                     projectID,
 		"subdomain":                     sb.Subdomain,
 		"url":                           sandboxURL,
 		"status":                        sb.Status,
@@ -390,18 +636,25 @@ func (s *Server) sandboxJSON(sb *db.Sandbox) map[string]any {
 	}
 }
 
-// uniqueSubdomain builds a routable subdomain: slugified repo name plus a
-// short random suffix, retried against collisions.
-func (s *Server) uniqueSubdomain(repoName string) (string, error) {
-	base := slugify(repoName)
-	if base == "" {
-		base = "sandbox"
+// uniqueSubdomain builds a routable subdomain from slug and shortID, retried against collisions.
+func (s *Server) uniqueSubdomain(slug, shortID string) (string, error) {
+	if slug == "" {
+		slug = "sandbox"
 	}
-	for i := 0; i < 5; i++ {
-		suffix := randomHex(3) // 6 hex chars
-		candidate := base + "-" + suffix
+	if shortID == "" {
+		shortID = randomHex(3)
+	}
+	candidate := fmt.Sprintf("%s-%s", slug, shortID)
+	if s.store == nil {
+		return candidate, nil
+	}
+	if _, err := s.store.GetSandboxBySubdomain(candidate); err != nil {
+		return candidate, nil // no collision found
+	}
+	for i := 0; i < 10; i++ {
+		candidate = fmt.Sprintf("%s-%s", slug, randomHex(3))
 		if _, err := s.store.GetSandboxBySubdomain(candidate); err != nil {
-			return candidate, nil // no collision found
+			return candidate, nil
 		}
 	}
 	return "", fmt.Errorf("could not find a free subdomain")
@@ -429,8 +682,8 @@ func randomHex(nBytes int) string {
 }
 
 func (s *Server) maxLifetime() int64 {
-	if m := s.cfg.MaxLifetimeSeconds; m > 0 {
-		return m
+	if s.cfg != nil && s.cfg.MaxLifetimeSeconds > 0 {
+		return s.cfg.MaxLifetimeSeconds
 	}
 	return MaxLifetimeSeconds
 }

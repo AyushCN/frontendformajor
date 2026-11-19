@@ -56,6 +56,20 @@ const (
 	DestroyUserRequested   DestructionReason = "user_requested"
 )
 
+// SandboxMode controls whether a sandbox uses the full build pipeline or the
+// live-development bind-mount path introduced in Phase 4.
+type SandboxMode string
+
+const (
+	// SandboxModeDeployment is the default: every save triggers a full image
+	// rebuild and a new container. No bind mount is used.
+	SandboxModeDeployment SandboxMode = "deployment"
+	// SandboxModeDevelopment mounts the workspace directly into a running dev
+	// container. Source changes become visible inside the container immediately
+	// after save. No Git commit or image rebuild is required.
+	SandboxModeDevelopment SandboxMode = "development"
+)
+
 // ---- Models -------------------------------------------------------------
 
 // User is a GitHub-authenticated account.
@@ -85,6 +99,8 @@ func (Repository) TableName() string { return "repositories" }
 // lifetime and idle-timeout controls.
 type Sandbox struct {
 	ID                 string        `gorm:"type:uuid;primaryKey"`
+	Name               string        `gorm:"type:text;not null;default:''"`
+	Slug               string        `gorm:"type:text;not null;default:''"`
 	RepositoryID       string        `gorm:"type:uuid;not null"`
 	ParentSandboxID    *string       `gorm:"type:uuid"`
 	BranchName         string        `gorm:"not null"`
@@ -116,6 +132,14 @@ type Sandbox struct {
 	AISuggestedEnv   datatypes.JSON `gorm:"type:jsonb"`
 	CreatedAt        time.Time      `gorm:"default:now()"`
 	UpdatedAt        time.Time      `gorm:"default:now()"`
+
+	// Development-preview mode columns (Phase 4).
+	// SandboxMode is "deployment" (default) or "development".
+	// In development mode the workspace is bind-mounted into a live container
+	// instead of triggering a full image rebuild on every save.
+	SandboxMode        SandboxMode `gorm:"column:sandbox_mode;type:text;not null;default:deployment"`
+	DevContainerID     string      `gorm:"column:dev_container_id;type:text"`
+	DevContainerPort   int         `gorm:"column:dev_container_port"`
 }
 
 // LifetimeWarning records that a particular expiry threshold ("24h", "1h",
@@ -135,11 +159,13 @@ func (LifetimeWarning) TableName() string { return "sandbox_lifetime_warnings" }
 // The DB stores the AES-encrypted value; the API layer encrypts on write and
 // decrypts only when injecting into a container.
 type EnvVar struct {
-	ID            string `gorm:"type:uuid;primaryKey"`
-	SandboxID     string `gorm:"type:uuid;uniqueIndex:uniq_sandbox_key,priority:1;not null"`
-	Key           string `gorm:"uniqueIndex:uniq_sandbox_key,priority:2;not null"`
-	Value         []byte `gorm:"not null"` // encrypted
-	IsAISuggested bool   `gorm:"not null;default:false"`
+	ID            string    `gorm:"type:uuid;primaryKey"`
+	SandboxID     string    `gorm:"type:uuid;uniqueIndex:uniq_sandbox_key,priority:1;not null"`
+	Key           string    `gorm:"uniqueIndex:uniq_sandbox_key,priority:2;not null"`
+	Value         []byte    `gorm:"not null"` // encrypted
+	IsAISuggested bool      `gorm:"not null;default:false"`
+	CreatedAt     time.Time `gorm:"default:now()"`
+	UpdatedAt     time.Time `gorm:"default:now()"`
 }
 
 // TableName matches the migration's 0001_init table name.
@@ -250,17 +276,18 @@ type ProjectRepository struct {
 }
 
 type ProjectMember struct {
-	ID         string              `gorm:"type:uuid;primaryKey" json:"id"`
-	ProjectID  string              `gorm:"type:uuid;not null;index" json:"projectId"`
-	UserID     string              `gorm:"type:uuid;not null;index" json:"userId"`
-	User       *User               `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	Role       ProjectMemberRole   `gorm:"not null" json:"role"`
-	Status     ProjectMemberStatus `gorm:"not null;default:'ACTIVE'" json:"status"`
-	InvitedBy  *string             `gorm:"type:uuid" json:"invitedBy,omitempty"`
-	InvitedAt  time.Time           `gorm:"not null;default:now()" json:"invitedAt"`
-	AcceptedAt *time.Time          `json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time           `gorm:"not null;default:now()" json:"createdAt"`
-	UpdatedAt  time.Time           `gorm:"not null;default:now()" json:"updatedAt"`
+	ID               string              `gorm:"type:uuid;primaryKey" json:"id"`
+	ProjectID        string              `gorm:"type:uuid;not null;index" json:"projectId"`
+	UserID           string              `gorm:"type:uuid;not null;index" json:"userId"`
+	User             *User               `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	Role             ProjectMemberRole   `gorm:"not null" json:"role"`
+	CanManageSecrets bool                `gorm:"not null;default:false" json:"canManageSecrets"`
+	Status           ProjectMemberStatus `gorm:"not null;default:'ACTIVE'" json:"status"`
+	InvitedBy        *string             `gorm:"type:uuid" json:"invitedBy,omitempty"`
+	InvitedAt        time.Time           `gorm:"not null;default:now()" json:"invitedAt"`
+	AcceptedAt       *time.Time          `json:"acceptedAt,omitempty"`
+	CreatedAt        time.Time           `gorm:"not null;default:now()" json:"createdAt"`
+	UpdatedAt        time.Time           `gorm:"not null;default:now()" json:"updatedAt"`
 }
 
 type ProjectInvitation struct {
@@ -280,8 +307,8 @@ type ProjectInvitation struct {
 }
 
 type ProjectSandbox struct {
-	ProjectID string    `gorm:"type:uuid;primaryKey" json:"projectId"`
-	SandboxID string    `gorm:"type:uuid;primaryKey" json:"sandboxId"`
+	ProjectID string    `gorm:"type:uuid;index;not null" json:"projectId"`
+	SandboxID string    `gorm:"type:uuid;primaryKey;uniqueIndex;not null" json:"sandboxId"`
 	CreatedAt time.Time `gorm:"not null;default:now()" json:"createdAt"`
 }
 
@@ -293,4 +320,15 @@ type AuditEvent struct {
 	Resource  string         `gorm:"not null" json:"resource"`
 	Details   datatypes.JSON `json:"details,omitempty"`
 	CreatedAt time.Time      `gorm:"not null;default:now()" json:"createdAt"`
+}
+
+type SandboxSubdomainAlias struct {
+	ID        string    `gorm:"type:uuid;primaryKey" json:"id"`
+	SandboxID string    `gorm:"type:uuid;not null;index" json:"sandboxId"`
+	Subdomain string    `gorm:"not null;uniqueIndex" json:"subdomain"`
+	CreatedAt time.Time `gorm:"not null;default:now()" json:"createdAt"`
+}
+
+func (SandboxSubdomainAlias) TableName() string {
+	return "sandbox_subdomain_aliases"
 }

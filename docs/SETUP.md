@@ -97,7 +97,7 @@ docker compose -f docker-compose.dev.yml up -d
 
 ## 4. Database Migrations
 
-Database migrations are tracked in [`backend/migrations/`](file:///home/swordrookie/projects/api_sandbox_links/api-sandbox-links/backend/migrations) (0001 through 0008).
+Database migrations are tracked in [`backend/migrations/`](file:///home/swordrookie/projects/api_sandbox_links/api-sandbox-links/backend/migrations) (0001 through 0012).
 
 ### Option A: Automatic Migration (Default)
 The backend API server automatically executes pending database migrations at startup via embedded SQL assets.
@@ -107,8 +107,17 @@ To run migrations explicitly without launching the API server:
 
 ```bash
 cd backend
-go run ./cmd/migrate up    # Apply all pending migrations (0001 through 0008)
+go run ./cmd/migrate up    # Apply all pending migrations (0001 through 0012)
 go run ./cmd/migrate down  # Roll back the most recent migration
+cd ..
+```
+
+### Rotating Master Secret Encryption Key
+To rotate the database encryption key without downtime:
+
+```bash
+cd backend
+go run ./cmd/rekey -old-key "<32-byte-hex-old>" -new-key "<32-byte-hex-new>"
 cd ..
 ```
 

@@ -292,6 +292,17 @@ func (s *Server) Router() http.Handler {
 			pr.Post("/{id}/restore", s.handleRestoreExpiredSandbox)
 			pr.Put("/{id}/settings", s.handleUpdateSettings)
 			pr.Patch("/{id}/settings", s.handleUpdateSettings)
+			pr.Post("/{id}/transfer", s.handleTransferSandbox)
+			pr.Post("/{id}/rename", s.handleRenameSandbox)
+			pr.Patch("/{id}/rename", s.handleRenameSandbox)
+
+			// Secure environment variables management
+			pr.Get("/{id}/env", s.handleListEnvVars)
+			pr.Post("/{id}/env", s.handleSetEnvVar)
+			pr.Delete("/{id}/env/{key}", s.handleDeleteEnvVar)
+			pr.Post("/{id}/env/upload", s.handleUploadEnv)
+			pr.Get("/{id}/env/requirements", s.handleDetectEnvRequirements)
+			pr.Post("/{id}/env/apply", s.handleApplyEnvToRuntime)
 
 			// Phase F/G: in-browser editor + git push.
 			pr.Get("/{id}/files", s.handleFileTree)
@@ -299,6 +310,7 @@ func (s *Server) Router() http.Handler {
 			pr.Put("/{id}/file", s.handleSaveFile)
 			pr.Post("/{id}/file", s.handleSaveFile)
 			pr.Post("/{id}/commit", s.handleCommitPush)
+			pr.Post("/{id}/git/untrack", s.handleUntrackFile)
 		})
 
 		// Live channels. Both share authorizeSandboxAccess and the same

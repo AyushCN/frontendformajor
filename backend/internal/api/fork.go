@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/db"
@@ -64,20 +65,36 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		childLifetime = s.maxLifetime()
 	}
 
-	subdomain := "fork-" + parent.Subdomain
+	parentName := parent.Name
+	if parentName == "" {
+		parentName = parent.Subdomain
+	}
+	childName := fmt.Sprintf("Fork of %s", parentName)
+	childSlug := db.NormalizeSlug(childName)
+	if childSlug == "" {
+		childSlug = "fork"
+	}
+	childID := uuid.NewString()
+	shortID := strings.ReplaceAll(childID, "-", "")[:6]
+
+	var subdomain string
 	if s.store != nil {
 		var err error
-		subdomain, err = s.uniqueSubdomain(subdomain)
+		subdomain, err = s.uniqueSubdomain(childSlug, shortID)
 		if err != nil {
 			forkLock.Release()
 			writeErr(w, http.StatusInternalServerError, "could not allocate subdomain")
 			return
 		}
+	} else {
+		subdomain = fmt.Sprintf("%s-%s", childSlug, shortID)
 	}
 
 	now := time.Now()
 	child := &db.Sandbox{
-		ID:                 uuid.NewString(),
+		ID:                 childID,
+		Name:               childName,
+		Slug:               childSlug,
 		RepositoryID:       parent.RepositoryID,
 		ParentSandboxID:    &parent.ID,
 		BranchName:         parent.BranchName,
@@ -88,8 +105,19 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:          now.Add(time.Duration(childLifetime) * time.Second),
 		CreatedAt:          now,
 	}
+	var targetProjectID string
 	if s.store != nil {
-		if err := s.store.CreateSandboxWithinLimits(child, user.ID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
+		if pid, err := s.store.GetProjectIDForSandbox(parent.ID); err == nil && pid != "" {
+			if role, err := s.store.GetProjectRole(pid, user.ID); err == nil && (role == db.ProjectMemberRoleOwner || role == db.ProjectMemberRoleEditor) {
+				targetProjectID = pid
+			}
+		}
+		if targetProjectID == "" {
+			if defProj, err := s.store.GetOrCreateDefaultProject(user.ID); err == nil && defProj != nil {
+				targetProjectID = defProj.ID
+			}
+		}
+		if err := s.store.CreateSandboxWithProject(child, user.ID, targetProjectID, s.maxActiveSandboxes(), s.maxRunningSandboxes()); err != nil {
 			forkLock.Release()
 			if errors.Is(err, db.ErrSandboxQuotaExceeded) {
 				s.writeSandboxQuotaExceeded(w)
@@ -107,7 +135,7 @@ func (s *Server) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	childJSON := s.sandboxJSON(child)
+	childJSON := s.sandboxJSONWithProject(child, targetProjectID)
 
 	started := s.goBackground(func(ctx context.Context) {
 		s.forkDeploy(ctx, parent, child, forkLock)

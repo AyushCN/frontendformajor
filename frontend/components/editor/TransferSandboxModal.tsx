@@ -16,6 +16,7 @@ interface TransferSandboxModalProps {
   currentProjectId?: string;
   projects?: ProjectOption[];
   isProjectsLoading: boolean;
+  sandboxName?: string;
 }
 
 export function TransferSandboxModal({
@@ -26,6 +27,7 @@ export function TransferSandboxModal({
   currentProjectId,
   projects,
   isProjectsLoading,
+  sandboxName,
 }: TransferSandboxModalProps) {
   const [transferProjectId, setTransferProjectId] = useState("");
 
@@ -44,10 +46,12 @@ export function TransferSandboxModal({
     >
       <div className="w-full max-w-md bg-surface-container-lowest rounded-2xl border border-outline-variant shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-outline-variant bg-surface-container/30">
-          <h3 className="font-semibold text-on-surface">Transfer Sandbox</h3>
+          <h3 className="font-semibold text-on-surface">
+            Transfer {sandboxName ? `"${sandboxName}"` : "Sandbox"}
+          </h3>
           <button
             onClick={onClose}
-            className="text-on-surface-variant hover:text-on-surface"
+            className="text-on-surface-variant hover:text-on-surface cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -81,7 +85,7 @@ export function TransferSandboxModal({
               </select>
             )}
             <p className="text-xs text-on-surface-variant mt-2">
-              Transferring this sandbox will instantly grant access to all
+              Transferring {sandboxName ? <strong className="text-on-surface font-semibold">{sandboxName}</strong> : "this sandbox"} will instantly grant access to all
               collaborators in the destination project.
             </p>
           </div>

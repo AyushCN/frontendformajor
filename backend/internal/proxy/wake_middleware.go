@@ -35,10 +35,17 @@ type wakeCall struct {
 	err  error
 }
 
+type gatewayStore interface {
+	GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error)
+	CanAccessSandbox(sandboxID, userID string) (bool, error)
+	TransitionToRunning(sandboxID string) error
+	GetUserByGithubID(githubID int64) (*db.User, error)
+}
+
 // Gateway reverse-proxies sandbox subdomain traffic to the matching container
 // and performs on-demand wake-ups.
 type Gateway struct {
-	store   *db.Store
+	store   gatewayStore
 	cache   *cache.Redis
 	orch    *orchestrator.Orchestrator
 	cfg     *config.Config
@@ -114,6 +121,22 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 	sandbox, err := g.store.GetSandboxBySubdomain(subdomain)
 	if err != nil {
 		http.NotFound(w, r)
+		return
+	}
+
+	// If accessed via an old alias subdomain rather than current primary subdomain,
+	// redirect seamlessly to the new canonical preview URL
+	if subdomain != sandbox.Subdomain {
+		baseDomain := "sandbox.localhost"
+		if g.cfg != nil && g.cfg.SandboxBaseDomain != "" {
+			baseDomain = g.cfg.SandboxBaseDomain
+		}
+		portStr := ""
+		if g.cfg != nil && g.cfg.GatewayPort > 0 && g.cfg.GatewayPort != 80 && g.cfg.GatewayPort != 443 {
+			portStr = fmt.Sprintf(":%d", g.cfg.GatewayPort)
+		}
+		targetURL := fmt.Sprintf("http://%s.%s%s%s", sandbox.Subdomain, baseDomain, portStr, r.URL.RequestURI())
+		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -287,14 +310,25 @@ func (g *Gateway) subdomainFromHost(host string) (string, error) {
 	if i := strings.LastIndex(host, ":"); i != -1 {
 		host = host[:i] // strip port
 	}
-	if !strings.HasSuffix(host, "."+g.cfg.SandboxBaseDomain) {
-		return "", fmt.Errorf("unrecognized sandbox host %q", host)
+	baseDomain := "sandbox.localhost"
+	if g.cfg != nil && g.cfg.SandboxBaseDomain != "" {
+		baseDomain = g.cfg.SandboxBaseDomain
 	}
-	sub := strings.TrimSuffix(host, "."+g.cfg.SandboxBaseDomain)
-	if sub == "" || strings.ContainsAny(sub, " ") {
-		return "", fmt.Errorf("malformed sandbox host %q", host)
+	if strings.HasSuffix(host, "."+baseDomain) {
+		sub := strings.TrimSuffix(host, "."+baseDomain)
+		if sub != "" && !strings.ContainsAny(sub, " ") {
+			return sub, nil
+		}
 	}
-	return sub, nil
+	for _, alt := range []string{"127.0.0.1.nip.io", "sandbox.localhost"} {
+		if alt != baseDomain && strings.HasSuffix(host, "."+alt) {
+			sub := strings.TrimSuffix(host, "."+alt)
+			if sub != "" && !strings.ContainsAny(sub, " ") {
+				return sub, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unrecognized sandbox host %q", host)
 }
 
 func (g *Gateway) authenticateRequest(r *http.Request) (*db.User, error) {

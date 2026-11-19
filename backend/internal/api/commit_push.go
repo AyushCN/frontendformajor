@@ -78,7 +78,14 @@ func (s *Server) handleCommitPush(w http.ResponseWriter, r *http.Request) {
 	defer saveLock.Release()
 
 	workDir := filepath.Join(s.cfg.SandboxWorkDir, sb.Subdomain)
-	hash, err := git.CommitAll(r.Context(), workDir, message)
+	hash, validation, err := git.SafeCommitAll(r.Context(), workDir, message)
+	if validation != nil && !validation.Allowed {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":      "commit blocked by secret protection policy",
+			"violations": validation.Violations,
+		})
+		return
+	}
 	if err != nil {
 		if errors.Is(err, git.ErrNoChanges) {
 			writeErr(w, http.StatusConflict, "nothing to commit (no changes in the sandbox working directory)")
@@ -117,4 +124,40 @@ func (s *Server) decryptUserToken(userID string) (string, error) {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+type untrackRequest struct {
+	Path string `json:"path"`
+}
+
+// handleUntrackFile removes a protected file from Git tracking while preserving the local workspace copy.
+func (s *Server) handleUntrackFile(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.userFrom(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	sb, ok := s.requireSandboxRoleForMutation(w, r)
+	if !ok {
+		return
+	}
+	s.touchSandbox(r.Context(), sb, user.ID)
+
+	var req untrackRequest
+	if err := decodeJSON(r, &req); err != nil || req.Path == "" {
+		writeErr(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	workDir := filepath.Join(s.cfg.SandboxWorkDir, sb.Subdomain)
+	if err := git.UntrackFile(r.Context(), workDir, req.Path); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to untrack file: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"untracked": true,
+		"path":      req.Path,
+		"message":   req.Path + " was removed from Git tracking and added to .gitignore",
+	})
 }

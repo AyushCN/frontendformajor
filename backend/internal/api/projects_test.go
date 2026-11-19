@@ -139,6 +139,75 @@ func (m *mockProjectsStore) GetSandbox(id string) (*db.Sandbox, error) {
 	return sb, nil
 }
 
+func (m *mockProjectsStore) GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error) {
+	for _, sb := range m.sandboxes {
+		if sb.Subdomain == subdomain {
+			return sb, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
+func (m *mockProjectsStore) CreateSandboxWithProject(sb *db.Sandbox, ownerUserID, projectID string, maxActive, maxRunning int) error {
+	m.sandboxes[sb.ID] = sb
+	m.sbProjects[sb.ID] = projectID
+	return nil
+}
+
+func (m *mockProjectsStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
+	out := make(map[string]string)
+	for _, id := range sandboxIDs {
+		if pid, ok := m.sbProjects[id]; ok {
+			out[id] = pid
+		}
+	}
+	return out, nil
+}
+
+func (m *mockProjectsStore) ListSandboxDatabases(sandboxID string) ([]*db.SandboxDatabase, error) {
+	return nil, nil
+}
+
+func (m *mockProjectsStore) AssociateProjectSandbox(projectID, sandboxID string) error {
+	m.sbProjects[sandboxID] = projectID
+	return nil
+}
+
+func (m *mockProjectsStore) FindOrCreateRepository(userID, cloneURL, defaultBranch string) (*db.Repository, error) {
+	return &db.Repository{ID: "repo-" + userID, UserID: userID, GithubURL: cloneURL, DefaultBranch: defaultBranch}, nil
+}
+
+func (m *mockProjectsStore) AddProjectRepository(repo *db.ProjectRepository) error {
+	return nil
+}
+
+func (m *mockProjectsStore) GetProjectIDForSandbox(sandboxID string) (string, error) {
+	if pid, ok := m.sbProjects[sandboxID]; ok {
+		return pid, nil
+	}
+	return "", errors.New("not found")
+}
+
+func (m *mockProjectsStore) RenameSandbox(sandboxID, newName string) (*db.Sandbox, error) {
+	if sb, ok := m.sandboxes[sandboxID]; ok {
+		sb.Name = newName
+		sb.Slug = db.NormalizeSlug(newName)
+		return sb, nil
+	}
+	return nil, errors.New("sandbox not found")
+}
+
+func (m *mockProjectsStore) TransferSandbox(sandboxID, destinationProjectID, actorUserID string) error {
+	if _, ok := m.sandboxes[sandboxID]; !ok {
+		return errors.New("sandbox not found")
+	}
+	if _, ok := m.projects[destinationProjectID]; !ok {
+		return errors.New("destination project not found")
+	}
+	m.sbProjects[sandboxID] = destinationProjectID
+	return nil
+}
+
 func (m *mockProjectsStore) GetUser(id string) (*db.User, error) {
 	u, ok := m.users[id]
 	if !ok {
@@ -423,6 +492,32 @@ func TestProjectsAndCollaboration(t *testing.T) {
 	_, err = srv.authorizeSandboxAccessWithRole(req, db.ProjectMemberRoleEditor)
 	if err != nil {
 		t.Fatalf("expected editor to be authorized for EDITOR actions, got error: %v", err)
+	}
+
+	// 12. Create a second project to test Transfer Sandbox
+	destProj := &db.Project{
+		ID:        "proj-dest-1",
+		Name:      "Destination Project",
+		CreatedBy: owner.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	mockStore.projects[destProj.ID] = destProj
+
+	// 13. Owner transfers sandbox sb.ID to destProj
+	transferBody := bytes.NewBufferString(`{"projectId":"` + destProj.ID + `"}`)
+	req = httptest.NewRequest("POST", "/api/sandboxes/"+sb.ID+"/transfer", transferBody)
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, owner))
+	rctx = chi.NewRouteContext()
+	rctx.URLParams.Add("id", sb.ID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w = httptest.NewRecorder()
+	srv.handleTransferSandbox(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 transferring sandbox, got %d: %s", w.Code, w.Body.String())
+	}
+	if mockStore.sbProjects[sb.ID] != destProj.ID {
+		t.Fatalf("expected sandbox project association to be %s, got %s", destProj.ID, mockStore.sbProjects[sb.ID])
 	}
 }
 

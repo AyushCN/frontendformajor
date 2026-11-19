@@ -643,7 +643,7 @@ func (s *Server) handleListProjectSandboxes(w http.ResponseWriter, r *http.Reque
 
 	out := make([]map[string]any, 0, len(sandboxes))
 	for _, sb := range sandboxes {
-		out = append(out, s.sandboxJSON(sb))
+		out = append(out, s.sandboxJSONWithProject(sb, id))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -664,14 +664,21 @@ func (s *Server) handleAssociateProjectSandbox(w http.ResponseWriter, r *http.Re
 	}
 
 	var req struct {
-		SandboxID string `json:"sandboxId"`
+		SandboxID  string `json:"sandboxId"`
+		SandboxID2 string `json:"sandbox_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.SandboxID) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	sbID := strings.TrimSpace(req.SandboxID)
+	if sbID == "" {
+		sbID = strings.TrimSpace(req.SandboxID2)
+	}
+	if sbID == "" {
 		writeErr(w, http.StatusBadRequest, "sandboxId required")
 		return
 	}
-
-	sbID := strings.TrimSpace(req.SandboxID)
 	owns, err := s.store.OwnsSandbox(sbID, user.ID)
 	if err != nil || !owns {
 		writeErr(w, http.StatusForbidden, "you do not own this sandbox")

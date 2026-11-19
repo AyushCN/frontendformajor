@@ -247,7 +247,7 @@ export default function SandboxesDashboard() {
           className="w-full max-w-md h-10 px-4 rounded-full bg-surface-container-lowest border border-outline-variant text-xs text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:border-outline-variant transition-colors shadow-xs"
         />
         <span className="text-xs font-mono text-on-surface-variant hidden sm:block">
-          Showing {filteredEnvs.length} environments
+          Showing {filteredEnvs.length} sandboxes
         </span>
       </div>
 
@@ -289,8 +289,8 @@ export default function SandboxesDashboard() {
             </h3>
             <p className="text-xs text-on-surface-variant mb-6 max-w-sm">
               {searchQuery
-                ? "No environments match your search query."
-                : "Deploy your first isolated code environment with zero configuration."}
+                ? "No sandboxes match your search query."
+                : "Deploy your first isolated code sandbox with zero configuration."}
             </p>
             <Link
               href="/upload"
@@ -309,7 +309,7 @@ export default function SandboxesDashboard() {
                 transition={{ delay: idx * 0.03, duration: 0.3 }}
               >
                 <div
-                  onClick={() => router.push(`/environments/${env.id}`)}
+                  onClick={() => router.push(`/sandboxes/${env.id}`)}
                   className="bg-surface-container-lowest border border-outline-variant rounded-[28px] p-6 h-full flex flex-col justify-between transition-all duration-300 hover:border-outline-variant/80 hover:shadow-lg dark:hover:shadow-[0_16px_48px_rgba(0,0,0,0.45)] hover:-translate-y-1 relative overflow-hidden group cursor-pointer"
                 >
                   <div>

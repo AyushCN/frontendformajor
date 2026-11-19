@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/api-sandbox-links/backend/internal/security"
 	"golang.org/x/sys/unix"
 )
 
@@ -297,6 +298,10 @@ func copyDirFd(srcFd, dstFd int, relPrefix string) error {
 	for _, e := range entries {
 		name := e.Name()
 		if name == ".git" {
+			continue
+		}
+		// Do not copy protected secret environment files into forked sandboxes
+		if security.IsProtectedEnvFile(name) {
 			continue
 		}
 		currentRel := name

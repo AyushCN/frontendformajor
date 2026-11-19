@@ -108,24 +108,20 @@ function UploadForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          name: data.name?.trim() || undefined,
           repo_url: data.gitUrl,
           branch: data.githubBranch || "main",
           lifetime_seconds: 86400,
           idle_timeout_seconds: 900,
           database: data.database,
+          project_id: data.projectId || undefined,
+          projectId: data.projectId || undefined,
         }),
       });
 
       const env = response;
-      if (data.projectId && env?.id) {
-        await fetch(`/api/projects/${data.projectId}/link`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sandboxId: env.id }),
-        }).catch(() => {});
-      }
       toast.success("Sandbox queued! Initializing build...");
-      router.push(`/environments/${env.id}`);
+      router.push(`/sandboxes/${env.id}`);
     } catch (error: unknown) {
       toast.error((error as Error).message);
     } finally {
@@ -180,12 +176,15 @@ function UploadForm() {
 
           {/* Sandbox Name */}
           <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-wider text-on-surface-variant">
-              Sandbox Label
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold uppercase tracking-wider text-on-surface-variant">
+                Sandbox Name
+              </label>
+              <span className="text-[10px] text-on-surface-variant/50">Optional — defaults to repo name</span>
+            </div>
             <input
               {...register("name")}
-              placeholder="e.g. inventory-service-api"
+              placeholder="e.g. Weather API Development"
               className="w-full h-11 bg-surface-container-low px-4 rounded-xl border border-outline-variant text-xs font-mono text-on-surface placeholder:text-on-surface-variant/40 focus:outline-none focus:border-outline-variant/60 transition-colors"
             />
             {errors.name && (

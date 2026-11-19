@@ -127,6 +127,12 @@ func (o *Orchestrator) TeardownSandbox(ctx context.Context, sandbox *db.Sandbox)
 			slog.String("sandbox", sandbox.ID), slog.String("err", err.Error()))
 	}
 
+	// Clean up encrypted environment variables associated with this destroyed sandbox
+	if err := o.store.DeleteAllEnvVars(sandbox.ID); err != nil {
+		o.logger.Warn("teardown: deleting sandbox env vars",
+			slog.String("sandbox", sandbox.ID), slog.String("err", err.Error()))
+	}
+
 	if o.cache != nil {
 		_ = o.cache.Clear(ctx, sandbox.ID)
 		_ = o.cache.ClearLatestStat(ctx, sandbox.ID)

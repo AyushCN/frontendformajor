@@ -111,33 +111,14 @@ func Clone(ctx context.Context, cloneURL, branch, dir string) (string, error) {
 // stage — callers translate it into a friendly 409 response.
 var ErrNoChanges = fmt.Errorf("git: no changes to commit")
 
-// CommitAll stages every change in the working tree and commits with the given
-// message. It returns the commit hash.
+// CommitAll stages every safe change in the working tree and commits with the given
+// message after validating that no protected environment files or secrets are leaked.
 func CommitAll(ctx context.Context, dir, message string) (string, error) {
-	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{DetectDotGit: true})
-	if err != nil {
-		return "", fmt.Errorf("git: opening repo at %s: %w", dir, err)
+	hash, val, err := SafeCommitAll(ctx, dir, message)
+	if val != nil && !val.Allowed {
+		return "", fmt.Errorf("git: commit blocked by secret protection policy (%d violations)", len(val.Violations))
 	}
-	wt, err := repo.Worktree()
-	if err != nil {
-		return "", fmt.Errorf("git: opening worktree: %w", err)
-	}
-	// pathspec "." stages everything, including deletions.
-	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
-		return "", fmt.Errorf("git: staging changes: %w", err)
-	}
-	status, err := wt.Status()
-	if err != nil {
-		return "", fmt.Errorf("git: reading status: %w", err)
-	}
-	if status.IsClean() {
-		return "", ErrNoChanges
-	}
-	hash, err := wt.Commit(message, &git.CommitOptions{})
-	if err != nil {
-		return "", fmt.Errorf("git: committing: %w", err)
-	}
-	return hash.String(), nil
+	return hash, err
 }
 
 // Push pushes the current branch to GitHub using the user's OAuth token. A

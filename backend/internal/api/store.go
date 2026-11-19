@@ -23,11 +23,20 @@ type Store interface {
 	GetRepository(id string) (*db.Repository, error)
 	CreateSandbox(sb *db.Sandbox) error
 	CreateSandboxWithinLimits(sb *db.Sandbox, userID string, maxActive, maxRunning int) error
+	CreateSandboxWithProject(sb *db.Sandbox, ownerUserID, projectID string, maxActive, maxRunning int) error
+	GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error)
 	UpsertEnvVar(sandboxID, key string, value []byte, aiSuggested bool) error
+	GetEnvVar(sandboxID, key string) (*db.EnvVar, error)
+	DeleteEnvVar(sandboxID, key string) error
+	DeleteAllEnvVars(sandboxID string) error
+	BulkUpsertEnvVars(sandboxID string, vars map[string][]byte, aiSuggested bool) error
+	ListEnvVars(sandboxID string) ([]*db.EnvVar, error)
+	CanManageSecretsForSandbox(sandboxID, userID string) (bool, error)
 	RecordFileEdit(sandboxID, relPath, userID string) error
 	MarkFileEditsPushed(sandboxID string) error
 	ListSandboxDatabases(sandboxID string) ([]*db.SandboxDatabase, error)
 	UpdateSandbox(id string, fields map[string]any) error
+	RenameSandbox(sandboxID, newName string) (*db.Sandbox, error)
 	ListDeployments(sandboxID string) ([]*db.Deployment, error)
 	ListWarningThresholds(sandboxID string) ([]string, error)
 	QueryResourceSnapshots(sandboxID string, since, until time.Time, limit int) ([]*db.ResourceSnapshot, error)
@@ -45,6 +54,7 @@ type Store interface {
 	RemoveProjectRepository(projectID, repoID string) error
 	AssociateProjectSandbox(projectID, sandboxID string) error
 	DisassociateProjectSandbox(projectID, sandboxID string) error
+	TransferSandbox(sandboxID, destinationProjectID, actorUserID string) error
 	GetProjectIDForSandbox(sandboxID string) (string, error)
 	ListProjectSandboxes(projectID string) ([]*db.Sandbox, error)
 	GetProjectRole(projectID, userID string) (db.ProjectMemberRole, error)

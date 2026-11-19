@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/api-sandbox-links/backend/internal/security"
 )
 
 // openNoSymlinkWrite on non-Linux platforms provides directory-handle confinement
@@ -81,6 +83,9 @@ func copyDir(src, dst string) error {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if security.IsProtectedEnvFile(p) {
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {

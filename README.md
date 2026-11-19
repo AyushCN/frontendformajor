@@ -15,6 +15,11 @@
 
 ## Highlights
 
+* 🔐 **Pre-Commit Secret Scanner & Git Shield**: In-memory `ValidatePreCommit` scanning across modified and newly created untracked files before staging (`SafeCommitAll`). Blocks raw credentials (AWS, GitHub, Slack, SSH private keys) and protected `.env` files with one-click untracking and `.gitignore` insertion.
+* 🛡️ **Authoritative Project Association & Transfer Integrity**: Database migration `0012` enforces strict 1-to-1 project mappings via atomic `CreateSandboxWithProject`. Eliminates cross-tenant misattribution and N+1 query bottlenecks via batch lookups.
+* 🔑 **Encrypted Environment Variable Onboarding**: First-run onboarding wizard popup detects missing environment requirements from templates (`.env.example`, `.env.sample`, `.env.defaults`) and source code (`process.env`, `os.Getenv`). Supports `.env` file upload (`MERGE` vs `REPLACE`), manual key-value editing, AES-256-GCM encryption at rest, and Monaco file tree masking.
+* 🏷️ **Consistent Sandbox Naming & Subdomain Routing**: Canonical display name (`name`), URL-safe slug (`slug`), and immutable sandbox ID (`id`) reflected consistently across dashboards, headers, Docker container metadata, Traefik routes, and preview URLs (`<slug>.127.0.0.1.nip.io`).
+* 📐 **Full-Width Studio Viewport Layout**: Standardized container sizing across Monaco Code Workspace, Logs, Collaborators, Team Activity, and Settings panels (`calc(100vh - 260px)`) with responsive multi-column layouts.
 * 🧠 **Deterministic Runtime Resolution & Availability**: Resolves exact runtime versions (Python 3.11.9, Node 22.14.0, Go 1.24.x $\rightarrow$ 1.24.0, Java 21 $\rightarrow$ 21.0.2) across an 8-tier precedence hierarchy. Validates versions against builder compatibility, host OS/architecture (`amd64`, `arm64`), and dependency constraints into 5 discrete states (`VERSION_SUPPORTED`, `VERSION_UNAVAILABLE`, `VERSION_UNSUPPORTED`, `VERSION_INCOMPATIBLE`, `VERSION_PROVISIONING_REQUIRED`) with zero silent version drift.
 * ⚡ **Shared BuildKit Runtime Cache**: 6-factor immutable artifact cache keys (`Language`, `Exact Version`, `OS`, `Architecture`, `DistributionID`, `BuilderVersion`) cached across independent sandboxes. Features thread-safe active build leasing (`AcquireLease`/`ReleaseLease`), LRU eviction preserving in-use artifacts, and byte quotas to eliminate duplicate downloads.
 * 🗃️ **Isolated Package-Manager Caching**: High-performance BuildKit cache mounts (`--mount=type=cache`) for `pip`, `uv`, `npm`, `pnpm`, `yarn`, `go` (build + mod), `maven`, `gradle`, `cargo`, and `ccache` with strict sharing modes (`shared`, `locked`, `private`) and multi-tenant namespace isolation.
@@ -259,9 +264,14 @@ npm run build
 - 🏛️ **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Ingress routing, wake-on-request, builder pipeline, runtime availability, and shared cache architecture.
 - ⚡ **[docs/LIFECYCLE.md](docs/LIFECYCLE.md)** — Lifecycle state machine, wake/expiry race fixes, grace periods, and data retention.
 - 👥 **[docs/COLLABORATION.md](docs/COLLABORATION.md)** — Project collaboration, RBAC matrix, and Copy-on-Write isolation.
-- 📡 **[docs/API.md](docs/API.md)** — Complete REST & WebSocket endpoint specifications.
-- 🗄️ **[docs/DATABASE.md](docs/DATABASE.md)** — PostgreSQL schema, migrations (0001–0008), and runtime telemetry persistence.
+- 📡 **[docs/API.md](docs/API.md)** — Complete REST & WebSocket endpoint specifications (env upload, rename, transfer, untrack).
+- 🗄️ **[docs/DATABASE.md](docs/DATABASE.md)** — PostgreSQL schema, migrations (0001–0012), project association integrity, and telemetry.
 - 🔒 **[docs/SECURITY.md](docs/SECURITY.md)** — Threat model, capability dropping, runtime isolation, and gVisor sandboxing.
+- 🏛️ **[docs/architecture/CONFIGURATION_MANAGEMENT.md](docs/architecture/CONFIGURATION_MANAGEMENT.md)** — Centralized 12-factor configuration blueprint and parameter matrix.
+- 🔑 **[docs/architecture/ENVIRONMENT_VARIABLE_LIFECYCLE.md](docs/architecture/ENVIRONMENT_VARIABLE_LIFECYCLE.md)** — 7-stage secret lifecycle, AES-256-GCM encryption, and Git commit shielding.
+- 🔍 **[docs/audit/REPOSITORY_OVERVIEW.md](docs/audit/REPOSITORY_OVERVIEW.md)** — Master architectural inventory, module responsibilities, callers, and failure modes.
+- 📋 **[docs/audit/REMEDIATION_LOG.md](docs/audit/REMEDIATION_LOG.md)** — Prioritized remediation tracking across P0 (Critical), P1, P2, and P3 defects.
+- 🧪 **[docs/qa/REGRESSION_RESULTS.md](docs/qa/REGRESSION_RESULTS.md)** — End-to-end regression verification across all 6 user journeys.
 - 🚀 **[docs/RUNBOOK.md](docs/RUNBOOK.md)** — Production operations, systemd units, automated recovery, and TLS.
 - 🔍 **[docs/SINGLE_TENANT_AUDIT.md](docs/SINGLE_TENANT_AUDIT.md)** — Engineering audit findings and production readiness remediation log.
 

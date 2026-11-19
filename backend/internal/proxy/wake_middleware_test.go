@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -185,3 +188,75 @@ func TestGatewayExpiredSandboxCannotBeWoken(t *testing.T) {
 		t.Errorf("expected sbPastExpiry to be recognized as expired")
 	}
 }
+
+func TestGatewayAliasSubdomainRedirect(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{
+		cfg: &config.Config{
+			SandboxBaseDomain: "127.0.0.1.nip.io",
+			GatewayPort:       8090,
+		},
+		logger: logger,
+	}
+
+	aliasSub := "old-weather-a81f2c"
+	canonicalSub := "weather-api-development-a81f2c"
+
+	sb := &db.Sandbox{
+		ID:        "a81f2c-uuid",
+		Name:      "Weather API Development",
+		Slug:      "weather-api-development",
+		Subdomain: canonicalSub,
+		Status:    db.StatusRunning,
+	}
+
+	mockStore := &mockAliasStore{
+		bySubdomain: map[string]*db.Sandbox{
+			aliasSub:     sb,
+			canonicalSub: sb,
+		},
+	}
+	g.store = mockStore
+
+	// Request to the alias subdomain
+	req := httptest.NewRequest("GET", "http://old-weather-a81f2c.127.0.0.1.nip.io:8090/api/v1/forecast?city=SF", nil)
+	rec := httptest.NewRecorder()
+
+	g.serve(rec, req)
+
+	res := rec.Result()
+	if res.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("expected status 307, got %d", res.StatusCode)
+	}
+
+	loc := res.Header.Get("Location")
+	expectedLoc := "http://weather-api-development-a81f2c.127.0.0.1.nip.io:8090/api/v1/forecast?city=SF"
+	if loc != expectedLoc {
+		t.Errorf("expected redirect location %q, got %q", expectedLoc, loc)
+	}
+}
+
+type mockAliasStore struct {
+	bySubdomain map[string]*db.Sandbox
+}
+
+func (m *mockAliasStore) GetSandboxBySubdomain(subdomain string) (*db.Sandbox, error) {
+	sb, ok := m.bySubdomain[subdomain]
+	if !ok {
+		return nil, errors.New("sandbox not found")
+	}
+	return sb, nil
+}
+
+func (m *mockAliasStore) CanAccessSandbox(sandboxID, userID string) (bool, error) {
+	return true, nil
+}
+
+func (m *mockAliasStore) TransitionToRunning(sandboxID string) error {
+	return nil
+}
+
+func (m *mockAliasStore) GetUserByGithubID(githubID int64) (*db.User, error) {
+	return nil, nil
+}
+

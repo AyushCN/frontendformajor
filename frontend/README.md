@@ -11,7 +11,10 @@ The frontend provides the graphical user interface and developer console for the
 
 ## Key Features
 
-* 💻 **In-Browser Cloud IDE**: Full-screen workspace with Monaco Editor, dynamic file tree explorer, live file save, and automated save-redeploy pipeline.
+* 💻 **In-Browser Cloud IDE & Sandbox Studio**: Full-screen workspace with Monaco Editor, dynamic file tree explorer, live file save, and automated save-redeploy pipeline.
+* 🔑 **Environment Variable Onboarding Wizard**: First-run popup detecting missing environment requirements with `.env` upload (`MERGE` vs `REPLACE`), manual key-value editing, and encrypted persistence.
+* 🛡️ **Git Pre-Commit Secret Shield**: In-browser commit modal surfaces security policy violations (AWS keys, GitHub tokens, protected `.env` files) with one-click untrack functionality.
+* 📐 **Standardized Full-Width Studio Layout**: Unified container sizing across Monaco Code Workspace, Logs, Collaborators, Team Activity, and Settings panels (`calc(100vh - 260px)`).
 * 🖥️ **Theme-Synchronized Terminal Consoles**: Real-time BuildKit log streams and live application stdout/stderr outputs styled in unified **Ash Grey** (`#EAECEF` light / `#1C1F24` dark) with custom scrollbars and step indicators.
 * 👥 **Workspace Projects Management**: Create and manage microservice workspaces, invite engineering team members with role-based access (`OWNER`, `EDITOR`, `VIEWER`), and isolate project environments with zero cross-tenant leakage.
 * 🌿 **Zero-Drift Git UI**: Visual branch management, current commit tracking, one-click commit & push to GitHub branches, and safe change preview boundaries.
@@ -29,11 +32,13 @@ frontend/app/
 │   ├── dashboard/page.tsx                  # Active sandboxes overview & quick actions
 │   ├── projects/page.tsx                   # Workspace projects listing & creation modal
 │   ├── projects/[id]/page.tsx              # Project details: Repos, Members, Workspaces, Sandboxes
-│   ├── environments/[id]/page.tsx          # Full cloud IDE: Editor, Logs, Terminal & Git UI
+│   ├── sandboxes/[id]/page.tsx             # Canonical Studio: Monaco, Logs, Collaborators, Settings
+│   ├── environments/[id]/page.tsx          # Backward-compatible redirect to /sandboxes/[id]
 │   ├── upload/page.tsx                     # Deploy new sandbox wizard (Repo, Branch, Database)
 │   └── profile/page.tsx                    # User settings, activity feed & credentials
 ├── api/                                    # Next.js BFF (Backend-for-Frontend) route handlers
-│   ├── environments/                       # Sandbox proxy & project-scoped filtering
+│   ├── environments/                       # Forwarding proxies with session cookie preservation
+│   ├── sandboxes/                          # Canonical sandbox creation & transfer API routes
 │   ├── projects/                           # Project creation, members, repos, workspaces
 │   └── me/                                 # Rewrites to backend /api/me
 ├── login/page.tsx                          # Developer login & GitHub OAuth sign-in

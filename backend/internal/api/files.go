@@ -18,16 +18,19 @@ import (
 	"time"
 
 	"github.com/api-sandbox-links/backend/internal/db"
+	"github.com/api-sandbox-links/backend/internal/envparse"
 	"github.com/api-sandbox-links/backend/internal/git"
 	"github.com/api-sandbox-links/backend/internal/orchestrator"
+	"github.com/api-sandbox-links/backend/internal/security"
 	"github.com/api-sandbox-links/backend/internal/workspacelock"
 )
 
 // fileEntry is the shape of one node in the file tree.
 type fileEntry struct {
-	Path string `json:"path"`
-	Dir  bool   `json:"dir"`
-	Size int64  `json:"size,omitempty"`
+	Path      string `json:"path"`
+	Dir       bool   `json:"dir"`
+	Size      int64  `json:"size,omitempty"`
+	Protected bool   `json:"protected,omitempty"`
 }
 
 // FileContentResult holds the data and metadata for an inspected file.
@@ -86,10 +89,12 @@ func readFileTree(rootHandle *os.Root) ([]fileEntry, error) {
 		if err != nil {
 			return nil
 		}
+		cleanSlash := filepath.ToSlash(path)
 		out = append(out, fileEntry{
-			Path: filepath.ToSlash(path),
-			Dir:  d.IsDir(),
-			Size: info.Size(),
+			Path:      cleanSlash,
+			Dir:       d.IsDir(),
+			Size:      info.Size(),
+			Protected: !d.IsDir() && security.IsProtectedEnvFile(cleanSlash),
 		})
 		return nil
 	})
@@ -135,12 +140,17 @@ func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"path":   res.Path,
-		"size":   res.Size,
-		"binary": res.Binary,
-		"mtime":  res.ModTime,
+		"path":      res.Path,
+		"size":      res.Size,
+		"binary":    res.Binary,
+		"protected": security.IsProtectedEnvFile(res.Path),
+		"mtime":     res.ModTime,
 	}
-	if res.Binary {
+	if security.IsProtectedEnvFile(res.Path) {
+		// Protected environment file: never expose raw secrets in normal editor!
+		resp["message"] = "Protected environment file. Values are encrypted at rest and masked in the editor."
+		resp["content"] = s.buildProtectedEnvView(r.Context(), sb.ID, string(res.Data))
+	} else if res.Binary {
 		resp["content"] = base64.StdEncoding.EncodeToString(res.Data)
 	} else {
 		resp["content"] = string(res.Data)
@@ -239,6 +249,14 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if security.IsProtectedEnvFile(cleanPath) {
+		canManage, err := s.store.CanManageSecretsForSandbox(sb.ID, user.ID)
+		if err != nil || !canManage {
+			writeErr(w, http.StatusForbidden, "you do not have permission to modify protected environment files")
+			return
+		}
+	}
+
 	var data []byte
 	if req.IsBase64 {
 		data, err = base64.StdEncoding.DecodeString(req.Content)
@@ -280,6 +298,18 @@ func (s *Server) handleSaveFile(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, http.StatusInternalServerError, "could not write file")
 		return
+	}
+
+	if security.IsProtectedEnvFile(cleanPath) {
+		if entries, pErr := envparse.Parse(string(data)); pErr == nil {
+			encMap := make(map[string][]byte, len(entries))
+			for _, e := range entries {
+				if enc, err := s.box.Encrypt([]byte(e.Value)); err == nil {
+					encMap[e.Key] = enc
+				}
+			}
+			_ = s.store.BulkUpsertEnvVars(sb.ID, encMap, false)
+		}
 	}
 
 	if s.store != nil {

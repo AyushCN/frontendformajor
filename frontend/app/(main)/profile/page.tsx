@@ -381,7 +381,7 @@ function DeleteAccountModal({
           <p className="text-sm text-on-surface-variant leading-relaxed">
             This action is{" "}
             <span className="font-bold text-on-surface">permanent</span> and
-            cannot be undone. All your environments, projects, and data will be
+            cannot be undone. All your sandboxes, projects, and data will be
             permanently wiped.
           </p>
           <div className="bg-error/10 border border-error/20 p-3 rounded-lg text-xs text-error font-mono">
@@ -575,8 +575,8 @@ export default function ProfilePage() {
           {[
             { id: "overview", label: "Overview", icon: Activity },
             {
-              id: "environments",
-              label: "Environments",
+              id: "sandboxes",
+              label: "Sandboxes",
               icon: BookOpen,
               count: user.envCount,
             },
@@ -790,7 +790,7 @@ export default function ProfilePage() {
 
                 {pinnedEnvs.length === 0 ? (
                   <div className="border border-outline-variant rounded-xl p-8 bg-surface-container-lowest text-center text-on-surface-variant">
-                    No environments created yet.{" "}
+                    No sandboxes created yet.{" "}
                     <Link
                       href="/upload"
                       className="text-primary-fixed hover:underline"
@@ -803,7 +803,7 @@ export default function ProfilePage() {
                     {pinnedEnvs.map((env) => (
                       <Link
                         key={env.id}
-                        href={`/environments/${env.id}`}
+                        href={`/sandboxes/${env.id}`}
                         className="border border-outline-variant rounded-xl p-4 bg-surface-container-lowest hover:border-primary-fixed/40 transition-all group flex flex-col justify-between"
                       >
                         <div>
@@ -884,12 +884,12 @@ export default function ProfilePage() {
             </>
           )}
 
-          {/* ── Environments Tab ── */}
-          {activeTab === "environments" && (
+          {/* ── Sandboxes Tab ── */}
+          {activeTab === "sandboxes" && (
             <div>
               <div className="flex items-center justify-between mb-4">
                 <p className="text-sm text-on-surface-variant">
-                  {allEnvs.length} environments
+                  {allEnvs.length} sandboxes
                 </p>
                 <Link
                   href="/upload"
@@ -902,7 +902,7 @@ export default function ProfilePage() {
                 <div className="border border-outline-variant rounded-xl p-12 bg-surface-container-lowest text-center">
                   <BookOpen className="w-12 h-12 mx-auto mb-4 text-on-surface-variant/50" />
                   <h3 className="text-lg font-semibold text-on-surface mb-2">
-                    No environments yet
+                    No sandboxes yet
                   </h3>
                   <p className="text-on-surface-variant mb-4">
                     Get started by creating your first sandbox.
@@ -911,7 +911,7 @@ export default function ProfilePage() {
                     href="/upload"
                     className="text-primary-fixed hover:underline font-semibold"
                   >
-                    Create environment →
+                    Create sandbox →
                   </Link>
                 </div>
               ) : (
@@ -919,7 +919,7 @@ export default function ProfilePage() {
                   {allEnvs.map((env) => (
                     <Link
                       key={env.id}
-                      href={`/environments/${env.id}`}
+                      href={`/sandboxes/${env.id}`}
                       className="block border border-outline-variant rounded-xl p-4 bg-surface-container-lowest hover:border-primary-fixed/40 transition-all group"
                     >
                       <div className="flex items-center justify-between">

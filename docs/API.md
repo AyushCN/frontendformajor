@@ -271,3 +271,65 @@ Emits normalized container metrics approximately once per second:
 | `1008` | Policy violation (unauthorized / not sandbox owner). | Stops retrying; displays authorization alert. |
 | `1006` | Abnormal closure (backend unreachable or network drop). | Exponential backoff (1s, 2s, 4s, 8s, up to 15s; max 5 attempts). |
 | `1011` | Unexpected internal server error. | Reconnects with exponential backoff. |
+
+---
+
+## 4. Environment Variables & Secret Security Endpoints
+
+### Upload Environment Variables — `POST /api/sandboxes/{id}/env/upload`
+Uploads raw `.env` contents with merge or replace semantics:
+- **Request Body:**
+  ```json
+  {
+    "content": "PORT=8080\nAPI_KEY=sk-test-12345",
+    "strategy": "merge" // "merge" (default) or "replace"
+  }
+  ```
+- **Response (`200 OK`):**
+  ```json
+  {
+    "message": "Environment variables updated successfully (2 variables processed)"
+  }
+  ```
+
+### Detect Required Environment Variables — `GET /api/sandboxes/{id}/env/requirements`
+Inspects workspace template files (`.env.example`, `.env.sample`, `.env.template`) and source code for required variables:
+- **Response (`200 OK`):**
+  ```json
+  {
+    "required": [
+      {
+        "key": "DATABASE_URL",
+        "example": "postgres://user:pass@localhost:5432/db",
+        "description": "PostgreSQL connection string",
+        "is_configured": true
+      },
+      {
+        "key": "SECRET_KEY",
+        "example": "",
+        "description": "Application session secret",
+        "is_configured": false
+      }
+    ],
+    "missing": 1
+  }
+  ```
+
+---
+
+## 5. Sandbox Project Management & Git Shield Endpoints
+
+### Rename Sandbox — `POST /api/sandboxes/{id}/rename`
+Updates canonical display name and syncs URL-safe slug:
+- **Request Body:** `{ "name": "Weather API Prod Testing" }`
+- **Response (`200 OK`):** `{ "message": "Sandbox renamed successfully", "sandbox": { ... } }`
+
+### Transfer Sandbox to Project — `POST /api/sandboxes/{id}/transfer`
+Atomically moves sandbox ownership and links repository to the destination project:
+- **Request Body:** `{ "project_id": "c1f7b820-21a4-4f9e-a890-..." }`
+- **Response (`200 OK`):** `{ "message": "Sandbox transferred successfully", "project_id": "..." }`
+
+### Untrack Sensitive File from Git — `POST /api/sandboxes/{id}/git/untrack`
+Safely removes file from the Git index, appends it to `.gitignore`, and preserves the local file on disk:
+- **Request Body:** `{ "path": ".env" }`
+- **Response (`200 OK`):** `{ "message": ".env untracked from Git and added to .gitignore" }`

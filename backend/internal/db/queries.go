@@ -2,11 +2,15 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -213,6 +217,74 @@ func (s *Store) CreateSandboxWithinLimits(sb *Sandbox, ownerUserID string, maxAc
 	})
 }
 
+// CreateSandboxWithProject creates a sandbox and establishes its authoritative project association
+// within a single atomic database transaction.
+func (s *Store) CreateSandboxWithProject(sb *Sandbox, ownerUserID, projectID string, maxActive, maxRunning int) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return errors.New("db: projectID is required for sandbox creation")
+	}
+	if sb.ID == "" {
+		sb.ID = newID()
+	}
+	sb.ExpiresAt = sb.CreatedAt.Add(time.Duration(sb.LifetimeSeconds) * time.Second)
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Validate destination project exists
+		var proj Project
+		if err := tx.Where("id = ?", projectID).First(&proj).Error; err != nil {
+			return fmt.Errorf("db: destination project not found: %w", err)
+		}
+
+		// 2. Acquire quota advisory locks
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+			"sandbox-quota:"+ownerUserID).Error; err != nil {
+			return fmt.Errorf("db: acquiring sandbox quota lock: %w", err)
+		}
+
+		var active int64
+		if err := tx.Raw(`SELECT count(*) FROM sandboxes s
+			JOIN repositories r ON r.id = s.repository_id
+			WHERE r.user_id = ? AND s.destroyed_at IS NULL`, ownerUserID).Scan(&active).Error; err != nil {
+			return fmt.Errorf("db: counting active sandboxes: %w", err)
+		}
+		if active >= int64(maxActive) {
+			return ErrSandboxQuotaExceeded
+		}
+
+		if maxRunning > 0 {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+				"sandbox-global-capacity").Error; err != nil {
+				return fmt.Errorf("db: acquiring global sandbox capacity lock: %w", err)
+			}
+			var running int64
+			if err := tx.Raw(`SELECT count(*) FROM sandboxes WHERE destroyed_at IS NULL`).Scan(&running).Error; err != nil {
+				return fmt.Errorf("db: counting live sandboxes: %w", err)
+			}
+			if running >= int64(maxRunning) {
+				return ErrGlobalCapacityReached
+			}
+		}
+
+		// 3. Insert sandbox record
+		if err := tx.Create(sb).Error; err != nil {
+			return fmt.Errorf("db: creating sandbox: %w", err)
+		}
+
+		// 4. Insert authoritative project association
+		ps := &ProjectSandbox{
+			ProjectID: projectID,
+			SandboxID: sb.ID,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := tx.Create(ps).Error; err != nil {
+			return fmt.Errorf("db: associating sandbox with project: %w", err)
+		}
+
+		return nil
+	})
+}
+
 // ErrSandboxDestroyed is returned by MarkSandboxActive when the row is already a
 // tombstone. A deploy that finishes after the user destroyed (or the reaper
 // expired) the sandbox must not resurrect it.
@@ -279,23 +351,189 @@ func (s *Store) GetSandbox(id string) (*Sandbox, error) {
 	return sb, nil
 }
 
-// GetSandboxBySubdomain fetches a sandbox by its subdomain (used by the
-// wake/reverse-proxy gateway to resolve incoming requests).
+// GetSandboxBySubdomain fetches a sandbox by its subdomain or historical alias
+// (used by the wake/reverse-proxy gateway to resolve incoming requests).
 func (s *Store) GetSandboxBySubdomain(sub string) (*Sandbox, error) {
-	sb := &Sandbox{}
-	if err := s.db.First(sb, "subdomain = ?", sub).Error; err != nil {
-		return nil, fmt.Errorf("db: fetching sandbox by subdomain %s: %w", sub, err)
+	sub = strings.TrimSpace(strings.ToLower(sub))
+	if sub == "" {
+		return nil, errors.New("db: empty subdomain")
 	}
+	sb := &Sandbox{}
+	if err := s.db.First(sb, "subdomain = ?", sub).Error; err == nil {
+		return sb, nil
+	}
+	// Check aliases
+	var alias SandboxSubdomainAlias
+	if err := s.db.Where("subdomain = ?", sub).First(&alias).Error; err == nil {
+		if err := s.db.First(sb, "id = ?", alias.SandboxID).Error; err == nil {
+			return sb, nil
+		}
+	}
+	return nil, fmt.Errorf("db: fetching sandbox by subdomain %s: not found", sub)
+}
+
+var nonSlugRegex = regexp.MustCompile(`[^a-z0-9]+`)
+
+// NormalizeSlug converts any user-defined name to a clean, URL-safe slug.
+func NormalizeSlug(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = nonSlugRegex.ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-")
+	for strings.Contains(name, "--") {
+		name = strings.ReplaceAll(name, "--", "-")
+	}
+	if len(name) > 40 {
+		name = name[:40]
+		name = strings.TrimSuffix(name, "-")
+	}
+	if name == "" {
+		name = "sandbox"
+	}
+	return name
+}
+
+// RenameSandbox updates the user-defined display name and canonical routing slug/subdomain.
+// The old subdomain is preserved in sandbox_subdomain_aliases so legacy links continue to route.
+func (s *Store) RenameSandbox(sandboxID, newName string) (*Sandbox, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	newName = strings.TrimSpace(newName)
+	if sandboxID == "" {
+		return nil, errors.New("sandbox ID is required")
+	}
+	if newName == "" {
+		return nil, errors.New("sandbox name cannot be empty")
+	}
+	if len(newName) > 100 {
+		return nil, errors.New("sandbox name cannot exceed 100 characters")
+	}
+
+	sb, err := s.GetSandbox(sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("fetching sandbox %s: %w", sandboxID, err)
+	}
+	if sb.DestroyedAt != nil {
+		return nil, errors.New("cannot rename a destroyed sandbox")
+	}
+
+	newSlug := NormalizeSlug(newName)
+	if newSlug == "" {
+		newSlug = "sandbox"
+	}
+
+	// Extract unique short ID suffix or derive from sandbox.ID
+	shortID := ""
+	if idx := strings.LastIndex(sb.Subdomain, "-"); idx != -1 && len(sb.Subdomain)-idx-1 >= 4 {
+		shortID = sb.Subdomain[idx+1:]
+	} else if len(sb.ID) >= 6 {
+		shortID = strings.ReplaceAll(sb.ID, "-", "")[:6]
+	} else {
+		shortID = "000000"
+	}
+
+	newSubdomain := fmt.Sprintf("%s-%s", newSlug, shortID)
+
+	// If only casing changed or slug/subdomain is identical, simply update name
+	if newSubdomain == sb.Subdomain {
+		if err := s.db.Model(sb).Update("name", newName).Error; err != nil {
+			return nil, fmt.Errorf("updating sandbox name: %w", err)
+		}
+		sb.Name = newName
+		return sb, nil
+	}
+
+	// If newSubdomain collides with another sandbox, retry with short random hex
+	if existing, err := s.GetSandboxBySubdomain(newSubdomain); err == nil && existing.ID != sb.ID {
+		for i := 0; i < 5; i++ {
+			candidate := fmt.Sprintf("%s-%s", newSlug, newID()[:6])
+			if _, err := s.GetSandboxBySubdomain(candidate); err != nil {
+				newSubdomain = candidate
+				break
+			}
+		}
+	}
+
+	oldSubdomain := sb.Subdomain
+
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Record old subdomain as alias if it's not already in aliases
+		alias := &SandboxSubdomainAlias{
+			ID:        newID(),
+			SandboxID: sb.ID,
+			Subdomain: oldSubdomain,
+			CreatedAt: time.Now().UTC(),
+		}
+		_ = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(alias).Error
+
+		// 2. Remove newSubdomain from aliases if it previously belonged to this sandbox
+		_ = tx.Delete(&SandboxSubdomainAlias{}, "subdomain = ?", newSubdomain).Error
+
+		// 3. Update sandbox record
+		now := time.Now().UTC()
+		if err := tx.Model(sb).Updates(map[string]any{
+			"name":       newName,
+			"slug":       newSlug,
+			"subdomain":  newSubdomain,
+			"updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+
+		// 4. Record audit event
+		detailsJSON, _ := json.Marshal(map[string]any{
+			"oldName":      sb.Name,
+			"newName":      newName,
+			"oldSubdomain": oldSubdomain,
+			"newSubdomain": newSubdomain,
+		})
+		projectID, _ := s.GetProjectIDForSandbox(sb.ID)
+		var projIDPtr *string
+		if projectID != "" {
+			projIDPtr = &projectID
+		}
+		audit := &AuditEvent{
+			ID:        newID(),
+			ProjectID: projIDPtr,
+			Action:    "RENAME_SANDBOX",
+			Resource:  "sandbox:" + sb.ID,
+			Details:   datatypes.JSON(detailsJSON),
+			CreatedAt: now,
+		}
+		_ = tx.Create(audit).Error
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("renaming sandbox in db: %w", err)
+	}
+
+	sb.Name = newName
+	sb.Slug = newSlug
+	sb.Subdomain = newSubdomain
 	return sb, nil
 }
 
-// ListSandboxes returns the user's sandboxes, newest first, together with the
-// repo URL so the UI can show "this sandbox was forked from X" and recreate.
+// ListSandboxes returns the user's sandboxes, newest first.
+// Authoritative multi-tenant visibility:
+// A user can see a sandbox if they have active membership in the project it belongs to.
+// Any legacy unassociated sandboxes are visible only to the direct repository owner.
 func (s *Store) ListSandboxes(userID string) ([]*Sandbox, error) {
 	var out []*Sandbox
-	// Only sandboxes reachable through the user's own repositories are shown.
-	sub := s.db.Where("repository_id IN (SELECT id FROM repositories WHERE user_id = ?)", userID)
-	if err := sub.Order("created_at DESC").Find(&out).Error; err != nil {
+	query := s.db.Where(`
+		id IN (
+			SELECT ps.sandbox_id FROM project_sandboxes ps
+			WHERE ps.project_id IN (
+				SELECT p.id FROM projects p WHERE p.created_by = ?
+				UNION
+				SELECT pm.project_id FROM project_members pm WHERE pm.user_id = ? AND pm.status = 'ACTIVE'
+			)
+		)
+		OR (
+			id NOT IN (SELECT sandbox_id FROM project_sandboxes)
+			AND repository_id IN (SELECT id FROM repositories WHERE user_id = ?)
+		)
+	`, userID, userID, userID)
+	if err := query.Order("created_at DESC").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("db: listing sandboxes: %w", err)
 	}
 	return out, nil
@@ -514,9 +752,18 @@ func (s *Store) ListWarningThresholds(sandboxID string) ([]string, error) {
 // stored encrypted; encrypt before calling).
 func (s *Store) UpsertEnvVar(sandboxID, key string, value []byte, aiSuggested bool) error {
 	v := &EnvVar{}
+	now := time.Now()
 	err := s.db.Where("sandbox_id = ? AND key = ?", sandboxID, key).First(v).Error
 	if err == gorm.ErrRecordNotFound {
-		v = &EnvVar{ID: newID(), SandboxID: sandboxID, Key: key, Value: value, IsAISuggested: aiSuggested}
+		v = &EnvVar{
+			ID:            newID(),
+			SandboxID:     sandboxID,
+			Key:           key,
+			Value:         value,
+			IsAISuggested: aiSuggested,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
 		if err := s.db.Create(v).Error; err != nil {
 			return fmt.Errorf("db: creating env var: %w", err)
 		}
@@ -526,13 +773,72 @@ func (s *Store) UpsertEnvVar(sandboxID, key string, value []byte, aiSuggested bo
 		return fmt.Errorf("db: looking up env var: %w", err)
 	}
 	return s.db.Model(v).Where("id = ?", v.ID).
-		Updates(map[string]any{"value": value, "is_ai_suggested": aiSuggested}).Error
+		Updates(map[string]any{"value": value, "is_ai_suggested": aiSuggested, "updated_at": now}).Error
+}
+
+// GetEnvVar fetches a single environment variable by sandbox ID and key.
+func (s *Store) GetEnvVar(sandboxID, key string) (*EnvVar, error) {
+	v := &EnvVar{}
+	if err := s.db.Where("sandbox_id = ? AND key = ?", sandboxID, key).First(v).Error; err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// DeleteEnvVar removes one environment variable by key.
+func (s *Store) DeleteEnvVar(sandboxID, key string) error {
+	res := s.db.Where("sandbox_id = ? AND key = ?", sandboxID, key).Delete(&EnvVar{})
+	if res.Error != nil {
+		return fmt.Errorf("db: deleting env var %s: %w", key, res.Error)
+	}
+	return nil
+}
+
+// DeleteAllEnvVars removes all environment variables for a sandbox (used during teardown).
+func (s *Store) DeleteAllEnvVars(sandboxID string) error {
+	if err := s.db.Where("sandbox_id = ?", sandboxID).Delete(&EnvVar{}).Error; err != nil {
+		return fmt.Errorf("db: deleting all env vars for sandbox %s: %w", sandboxID, err)
+	}
+	return nil
+}
+
+// BulkUpsertEnvVars atomically inserts or updates a map of encrypted environment variables.
+func (s *Store) BulkUpsertEnvVars(sandboxID string, vars map[string][]byte, aiSuggested bool) error {
+	now := time.Now()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		for k, val := range vars {
+			var existing EnvVar
+			err := tx.Where("sandbox_id = ? AND key = ?", sandboxID, k).First(&existing).Error
+			if err == gorm.ErrRecordNotFound {
+				newVar := EnvVar{
+					ID:            newID(),
+					SandboxID:     sandboxID,
+					Key:           k,
+					Value:         val,
+					IsAISuggested: aiSuggested,
+					CreatedAt:     now,
+					UpdatedAt:     now,
+				}
+				if err := tx.Create(&newVar).Error; err != nil {
+					return fmt.Errorf("db: creating bulk env var %s: %w", k, err)
+				}
+			} else if err != nil {
+				return fmt.Errorf("db: querying bulk env var %s: %w", k, err)
+			} else {
+				if err := tx.Model(&existing).Where("id = ?", existing.ID).
+					Updates(map[string]any{"value": val, "is_ai_suggested": aiSuggested, "updated_at": now}).Error; err != nil {
+					return fmt.Errorf("db: updating bulk env var %s: %w", k, err)
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // ListEnvVars returns all env vars for a sandbox (encrypted values).
 func (s *Store) ListEnvVars(sandboxID string) ([]*EnvVar, error) {
 	var out []*EnvVar
-	if err := s.db.Where("sandbox_id = ?", sandboxID).Find(&out).Error; err != nil {
+	if err := s.db.Where("sandbox_id = ?", sandboxID).Order("key ASC").Find(&out).Error; err != nil {
 		return nil, fmt.Errorf("db: listing env vars: %w", err)
 	}
 	return out, nil
@@ -924,9 +1230,13 @@ func (s *Store) RemoveProjectRepository(projectID, repoID string) error {
 
 // AssociateProjectSandbox links a sandbox to a project.
 func (s *Store) AssociateProjectSandbox(projectID, sandboxID string) error {
-	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&ProjectSandbox{
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "sandbox_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"project_id"}),
+	}).Create(&ProjectSandbox{
 		ProjectID: projectID,
 		SandboxID: sandboxID,
+		CreatedAt: time.Now().UTC(),
 	}).Error
 }
 
@@ -945,6 +1255,22 @@ func (s *Store) GetProjectIDForSandbox(sandboxID string) (string, error) {
 	return ps.ProjectID, nil
 }
 
+// GetProjectIDsForSandboxes batch-resolves project IDs for multiple sandboxes to eliminate N+1 queries.
+func (s *Store) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
+	if len(sandboxIDs) == 0 {
+		return map[string]string{}, nil
+	}
+	var records []ProjectSandbox
+	if err := s.db.Where("sandbox_id IN ?", sandboxIDs).Find(&records).Error; err != nil {
+		return nil, fmt.Errorf("db: fetching project sandbox associations: %w", err)
+	}
+	out := make(map[string]string, len(records))
+	for _, r := range records {
+		out[r.SandboxID] = r.ProjectID
+	}
+	return out, nil
+}
+
 // ListProjectSandboxes returns all active sandboxes associated with a project.
 func (s *Store) ListProjectSandboxes(projectID string) ([]*Sandbox, error) {
 	var sandboxes []*Sandbox
@@ -952,6 +1278,104 @@ func (s *Store) ListProjectSandboxes(projectID string) ([]*Sandbox, error) {
 		Where("project_sandboxes.project_id = ? AND sandboxes.destroyed_at IS NULL", projectID).
 		Find(&sandboxes).Error
 	return sandboxes, err
+}
+
+// TransferSandbox moves an existing sandbox to destinationProjectID within an atomic database transaction.
+func (s *Store) TransferSandbox(sandboxID, destinationProjectID, actorUserID string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	destinationProjectID = strings.TrimSpace(destinationProjectID)
+	actorUserID = strings.TrimSpace(actorUserID)
+
+	if sandboxID == "" || destinationProjectID == "" || actorUserID == "" {
+		return errors.New("sandboxID, destinationProjectID, and actorUserID are required")
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Lock sandbox row and verify existence + status
+		var sb Sandbox
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", sandboxID).First(&sb).Error; err != nil {
+			return fmt.Errorf("sandbox not found: %w", err)
+		}
+		if sb.DestroyedAt != nil || sb.Status == StatusDeleted || sb.Status == StatusExpired {
+			return errors.New("cannot transfer a destroyed or expired sandbox")
+		}
+
+		// 2. Lock and retrieve current project association
+		var currentPS ProjectSandbox
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("sandbox_id = ?", sandboxID).First(&currentPS).Error; err != nil {
+			return errors.New("sandbox has missing project association; cannot transfer")
+		}
+		currentProjectID := currentPS.ProjectID
+
+		// 3. Idempotency: if already in destination project, return nil
+		if currentProjectID == destinationProjectID {
+			return nil
+		}
+
+		// 4. Verify actor's authority: must be direct sandbox owner OR OWNER in source project
+		owns, err := s.OwnsSandbox(sandboxID, actorUserID)
+		if err != nil {
+			return fmt.Errorf("checking ownership: %w", err)
+		}
+		if !owns {
+			role, roleErr := s.GetProjectRole(currentProjectID, actorUserID)
+			if roleErr != nil || role != ProjectMemberRoleOwner {
+				return errors.New("access denied: only the sandbox owner or current project owner can transfer this sandbox")
+			}
+		}
+
+		// 5. Verify destination project exists
+		var destProj Project
+		if err := tx.Where("id = ?", destinationProjectID).First(&destProj).Error; err != nil {
+			return fmt.Errorf("destination project not found: %w", err)
+		}
+
+		// 6. Verify actor has OWNER or EDITOR role in destination project
+		destRole, err := s.GetProjectRole(destinationProjectID, actorUserID)
+		if err != nil || (destRole != ProjectMemberRoleOwner && destRole != ProjectMemberRoleEditor) {
+			return errors.New("access denied: you must be an owner or editor in the destination project")
+		}
+
+		// 7. Atomically move association in project_sandboxes
+		if err := tx.Delete(&ProjectSandbox{}, "sandbox_id = ?", sandboxID).Error; err != nil {
+			return fmt.Errorf("removing existing project sandbox link: %w", err)
+		}
+
+		newPS := &ProjectSandbox{
+			ProjectID: destinationProjectID,
+			SandboxID: sandboxID,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := tx.Create(newPS).Error; err != nil {
+			return fmt.Errorf("associating sandbox with destination project: %w", err)
+		}
+
+		// Note: The source repository association is NOT modified (Mandatory Rules 1 & 5).
+
+		// 8. Record structured audit event
+		detailsJSON, _ := json.Marshal(map[string]any{
+			"sandboxId":            sandboxID,
+			"sourceProjectId":      currentProjectID,
+			"destinationProjectId": destinationProjectID,
+			"destinationName":      destProj.Name,
+			"actorUserId":          actorUserID,
+			"outcome":              "SUCCESS",
+		})
+		audit := &AuditEvent{
+			ID:        newID(),
+			ProjectID: &destinationProjectID,
+			UserID:    &actorUserID,
+			Action:    "TRANSFER_SANDBOX",
+			Resource:  "sandbox:" + sandboxID,
+			Details:   datatypes.JSON(detailsJSON),
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := tx.Create(audit).Error; err != nil {
+			return fmt.Errorf("recording audit event: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // GetProjectRole returns the user's role in a project (OWNER, EDITOR, VIEWER).
@@ -1010,6 +1434,41 @@ func (s *Store) GetSandboxRole(sandboxID, userID string) (ProjectMemberRole, err
 	}
 
 	return "", errors.New("access denied: user has no authorized role for this sandbox")
+}
+
+// CanManageSecretsForSandbox determines whether a user has permission to manage or reveal
+// environment variables and secrets for the sandbox (Owner or explicitly granted Secrets Manager).
+func (s *Store) CanManageSecretsForSandbox(sandboxID, userID string) (bool, error) {
+	if sandboxID == "" || userID == "" {
+		return false, errors.New("db: sandbox and user ID required")
+	}
+
+	// 1. Direct ownership grants full secrets management
+	owns, err := s.OwnsSandbox(sandboxID, userID)
+	if err == nil && owns {
+		return true, nil
+	}
+
+	// 2. Project membership: OWNER role or explicitly granted can_manage_secrets
+	type memberPerm struct {
+		Role             ProjectMemberRole
+		CanManageSecrets bool
+	}
+	var perms []memberPerm
+	err = s.db.Model(&ProjectMember{}).
+		Select("project_members.role, project_members.can_manage_secrets").
+		Joins("JOIN project_sandboxes ON project_sandboxes.project_id = project_members.project_id").
+		Where("project_sandboxes.sandbox_id = ? AND project_members.user_id = ? AND project_members.status = 'ACTIVE'", sandboxID, userID).
+		Scan(&perms).Error
+
+	if err == nil && len(perms) > 0 {
+		for _, p := range perms {
+			if p.Role == ProjectMemberRoleOwner || p.CanManageSecrets {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // ListProjectMembers returns all active project members with populated User info.

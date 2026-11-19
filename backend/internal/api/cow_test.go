@@ -73,6 +73,29 @@ func (m *mockCoWStore) CreateSandboxWithinLimits(sb *db.Sandbox, ownerUserID str
 	return nil
 }
 
+func (m *mockCoWStore) CreateSandboxWithProject(sb *db.Sandbox, ownerUserID, projectID string, maxPerUser, maxTotal int) error {
+	m.sandboxes[sb.ID] = sb
+	m.ownership[sb.ID] = ownerUserID
+	if _, ok := m.sandboxRoles[sb.ID]; !ok {
+		m.sandboxRoles[sb.ID] = make(map[string]db.ProjectMemberRole)
+	}
+	m.sandboxRoles[sb.ID][ownerUserID] = db.ProjectMemberRoleOwner
+	if projectID != "" {
+		m.projectSandboxes[sb.ID] = projectID
+	}
+	return nil
+}
+
+func (m *mockCoWStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
+	out := make(map[string]string)
+	for _, id := range sandboxIDs {
+		if pid, ok := m.projectSandboxes[id]; ok {
+			out[id] = pid
+		}
+	}
+	return out, nil
+}
+
 func (m *mockCoWStore) GetProjectIDForSandbox(sandboxID string) (string, error) {
 	pID, ok := m.projectSandboxes[sandboxID]
 	if !ok {

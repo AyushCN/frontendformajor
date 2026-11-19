@@ -19,6 +19,10 @@ PostgreSQL is accessed via GORM in the Go backend. Database migrations are stric
 - `0006_projects_collaboration.up.sql`: Relational tables for workspace projects, member permissions (`OWNER`, `EDITOR`, `VIEWER`), and invitations.
 - `0007_default_project_unique_and_cow.up.sql`: Default workspace constraint and Copy-on-Write sandbox forking lineage.
 - `0008_runtime_telemetry.up.sql`: Runtime observability on `deployments` (`requested_runtime`, `resolved_runtime`, `runtime_artifact_id`, `provisioning_status`, `build_failure_reason`).
+- `0009_sandbox_dev_mode.up.sql`: Adds `execution_mode` to `sandboxes` (`preview` vs `development` mode for Monaco live hot-reloading).
+- `0010_secure_env_vars.up.sql`: Dedicated `env_vars` table for AES-256-GCM encrypted secrets at rest with `(sandbox_id, key)` unique constraint.
+- `0011_consistent_sandbox_naming.up.sql`: Canonical `name` (display name) and `slug` (URL-safe routing identifier) columns on `sandboxes`.
+- `0012_sandbox_project_association_integrity.up.sql`: Authoritative `project_sandboxes` mapping table with foreign keys ensuring strict 1-to-1 project integrity.
 
 ### Running Migrations
 

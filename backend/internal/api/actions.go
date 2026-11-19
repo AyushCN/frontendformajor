@@ -515,6 +515,7 @@ func (s *Server) handleLifecycleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSettingsRequest struct {
+	Name                        *string `json:"name"`
 	IdleTimeoutSeconds          *int    `json:"idleTimeoutSeconds"`
 	HibernatedExpirationSeconds *int64  `json:"hibernatedExpirationSeconds"`
 	WorkspaceRetentionSeconds   *int64  `json:"workspaceRetentionSeconds"`
@@ -533,6 +534,15 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	if req.Name != nil && strings.TrimSpace(*req.Name) != "" && strings.TrimSpace(*req.Name) != sb.Name {
+		renamed, err := s.store.RenameSandbox(sb.ID, strings.TrimSpace(*req.Name))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		sb = renamed
 	}
 
 	idleSec := sb.IdleTimeoutSeconds

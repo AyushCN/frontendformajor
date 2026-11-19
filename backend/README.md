@@ -38,6 +38,17 @@ The backend service is a compiled Go binary providing both the **REST and WebSoc
 * ⚡ **Single-Flight Container Wake-on-Request**:
   * Coalesces concurrent HTTP requests to a sleeping sandbox into a single `docker start` operation.
   * Waits for TCP readiness before proxying requests.
+* 🔐 **Pre-Commit Secret Scanner & Git Shield**:
+  * In-memory `ValidatePreCommit` scanning across modified and untracked files before staging.
+  * Blocks protected environment files (`.env`, `.env.local`) and detected raw credential patterns (AWS, GitHub, Slack, SSH keys).
+  * Provides one-click untrack API (`POST /api/sandboxes/{id}/git/untrack`) leaving local files on disk intact while adding them to `.gitignore`.
+* 🛡️ **Authoritative Project Association & Transfer Integrity**:
+  * Enforces atomic 1-to-1 project mappings via `CreateSandboxWithProject` (Migration `0012`).
+  * Eliminates cross-tenant misattribution and removes silent fallback guessing in `sandboxJSON`.
+  * Optimizes listing performance via batch project ID lookups (`GetProjectIDsForSandboxes`).
+* 🏷️ **Consistent Sandbox Naming & Predictable Subdomains**:
+  * Unified naming model maintaining `name` (user display name), `slug` (URL-safe normalized name), and immutable `id`.
+  * Reflects canonical display names across headers, activity logs, and preview URLs (`<slug>.127.0.0.1.nip.io`).
 * 🛡️ **Container Hardening & Google gVisor**:
   * Drops all Linux capabilities (`CapDrop: ALL`), enforces `no-new-privileges`, supervises processes with `tini` init, and provides opt-in gVisor (`runsc`) user-space kernel virtualization.
 
@@ -49,12 +60,16 @@ The backend service is a compiled Go binary providing both the **REST and WebSoc
 backend/
 ├── cmd/
 │   ├── server/                   # Application main entrypoint
-│   └── migrate/                  # Standalone database migration CLI
+│   ├── migrate/                  # Standalone database migration CLI
+│   └── rekey/                    # AES-256 master key rotation CLI
 ├── internal/
+│   ├── ai/                       # Gemini 2.5 Flash client (env suggestions, OpenAPI)
 │   ├── api/                      # chi router, middlewares, WebSocket handlers, auth
+│   ├── cache/                    # Redis sliding expiration and distributed state
 │   ├── config/                   # Environment configuration loader and validation
 │   ├── db/                       # GORM models, repository interfaces, queries
-│   ├── git/                      # Repository cloning, branch switching, commit & push
+│   ├── envparse/                 # Robust .env lexer, quotation stripper, and normalizer
+│   ├── git/                      # Git ops, secret_guard pre-commit scanner, safe commit
 │   ├── orchestrator/             # Container lifecycle, builders, and runtime management
 │   │   ├── runtime_types.go      # VersionStatus, 6-factor RuntimeCacheKey, CacheMountConfig
 │   │   ├── runtime_cache.go      # SharedRuntimeCache with thread-safe leases & LRU eviction
@@ -68,8 +83,12 @@ backend/
 │   │   ├── builder_dockerfile.go # Native Dockerfile builder
 │   │   └── deploy.go             # Deployment execution, status updates & telemetry
 │   ├── proxy/                    # Ingress reverse proxy & single-flight wake logic
-│   └── reaper/                   # Idle and lifetime expiration background workers
-└── migrations/                   # Versioned SQL migrations (0001–0008)
+│   ├── reaper/                   # Idle and lifetime expiration background workers
+│   ├── runtime/                  # Docker runner interfaces and execution abstraction
+│   ├── secret/                   # AES-256-GCM envelope encryption and decryption
+│   ├── security/                 # Lexical path confinement, symlink resolution, secret patterns
+│   └── workspacelock/            # In-memory per-sandbox read-write lock registry
+└── migrations/                   # Versioned SQL migrations (0001–0012)
 ```
 
 ---

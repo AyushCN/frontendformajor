@@ -25,9 +25,10 @@ import (
 type forkSyncStore struct {
 	Store // Embeds the interface; unused methods remain unimplemented.
 
-	mu           sync.RWMutex
-	sandboxes    map[string]*db.Sandbox
-	repositories map[string]*db.Repository
+	mu               sync.RWMutex
+	sandboxes        map[string]*db.Sandbox
+	repositories     map[string]*db.Repository
+	projectSandboxes map[string]string
 }
 
 func newForkSyncStore(user *db.User, parent *db.Sandbox) *forkSyncStore {
@@ -43,6 +44,7 @@ func newForkSyncStore(user *db.User, parent *db.Sandbox) *forkSyncStore {
 				UserID: user.ID,
 			},
 		},
+		projectSandboxes: make(map[string]string),
 	}
 }
 
@@ -115,6 +117,35 @@ func (s *forkSyncStore) CreateSandboxWithinLimits(
 	return nil
 }
 
+func (s *forkSyncStore) CreateSandboxWithProject(
+	sb *db.Sandbox,
+	userID string,
+	projectID string,
+	maxActive, maxRunning int,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cp := *sb
+	s.sandboxes[sb.ID] = &cp
+	if projectID != "" {
+		s.projectSandboxes[sb.ID] = projectID
+	}
+	return nil
+}
+
+func (s *forkSyncStore) GetProjectIDsForSandboxes(sandboxIDs []string) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string)
+	for _, id := range sandboxIDs {
+		if pid, ok := s.projectSandboxes[id]; ok {
+			out[id] = pid
+		}
+	}
+	return out, nil
+}
+
 func (s *forkSyncStore) GetRepository(id string) (*db.Repository, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -149,6 +180,36 @@ func (s *forkSyncStore) UpdateSandbox(id string, fields map[string]any) error {
 		sb.Status = db.SandboxStatus(status)
 	}
 
+	return nil
+}
+
+func (s *forkSyncStore) GetProjectIDForSandbox(sandboxID string) (string, error) {
+	return "test-project-1", nil
+}
+
+func (s *forkSyncStore) GetProjectRole(projectID, userID string) (db.ProjectMemberRole, error) {
+	return db.ProjectMemberRoleOwner, nil
+}
+
+func (s *forkSyncStore) GetOrCreateDefaultProject(userID string) (*db.Project, error) {
+	return &db.Project{ID: "test-default-project", Name: "Default Workspace", CreatedBy: userID}, nil
+}
+
+func (s *forkSyncStore) AssociateProjectSandbox(projectID, sandboxID string) error {
+	return nil
+}
+
+func (s *forkSyncStore) RenameSandbox(sandboxID, newName string) (*db.Sandbox, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sb, ok := s.sandboxes[sandboxID]; ok {
+		sb.Name = newName
+		return sb, nil
+	}
+	return nil, errors.New("sandbox not found")
+}
+
+func (s *forkSyncStore) AddProjectRepository(repo *db.ProjectRepository) error {
 	return nil
 }
 
