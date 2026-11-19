@@ -25,6 +25,9 @@ import (
 	"github.com/api-sandbox-links/backend/internal/proxy"
 	"github.com/api-sandbox-links/backend/internal/secret"
 	"github.com/docker/docker/client"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -32,11 +35,65 @@ import (
 
 // Smoke test configuration defaults.
 const (
-	defaultSampleRepo   = "https://github.com/heroku/node-js-sample.git"
-	defaultSampleBranch = "master" // heroku/node-js-sample uses master branch
+	defaultSampleBranch = "master"
 	defaultDevPostgres  = "postgres://user:pass@127.0.0.1:5434/sandbox_platform?sslmode=disable"
 	defaultDevRedis     = "redis://127.0.0.1:6380"
 )
+
+func createLocalSmokeRepo(t *testing.T) string {
+	t.Helper()
+
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatalf("failed to initialize local smoke repository: %v", err)
+	}
+
+	files := map[string]string{
+		"package.json": `{"name":"smoke-sample","private":true,"scripts":{"start":"node server.js"},"engines":{"node":">=18"}}`,
+		"server.js":    `const http=require("http");const port=process.env.PORT||3000;http.createServer((req,res)=>{res.writeHead(200,{"Content-Type":"text/plain"});res.end("Hello World!")}).listen(port,"0.0.0.0");`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0o755); err != nil {
+			t.Fatalf("failed to write local smoke repository %s: %v", name, err)
+		}
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to open local smoke repository worktree: %v", err)
+	}
+	if _, err := worktree.Add("."); err != nil {
+		t.Fatalf("failed to stage local smoke repository: %v", err)
+	}
+	if _, err := worktree.Commit("Add smoke sample", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Smoke Test",
+			Email: "smoke@example.test",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("failed to commit local smoke repository: %v", err)
+	}
+
+	return repoDir
+}
+
+func TestCreateLocalSmokeRepo(t *testing.T) {
+	repoDir := createLocalSmokeRepo(t)
+	cloneDir := t.TempDir()
+	if _, err := git.PlainClone(cloneDir, false, &git.CloneOptions{
+		URL:           repoDir,
+		ReferenceName: plumbing.NewBranchReferenceName(defaultSampleBranch),
+		SingleBranch:  true,
+		Depth:         1,
+	}); err != nil {
+		t.Fatalf("failed to clone local smoke repository: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cloneDir, "server.js")); err != nil {
+		t.Fatalf("local smoke repository is missing server.js: %v", err)
+	}
+}
 
 // smokeEnv validates availability of real Docker, Postgres, Redis, and Builder CLI.
 // If any prerequisite is missing, the test skips gracefully with actionable setup instructions.
@@ -214,7 +271,7 @@ func setupSmokeEnv(t *testing.T) *smokeEnv {
 }
 
 // TestSmokeDeployNodeJSSample runs a full end-to-end smoke test:
-// 1. Clones heroku/node-js-sample (shallow).
+// 1. Clones a deterministic local Node.js sample (shallow).
 // 2. Analyzes build plan with configured builder (default railpack).
 // 3. Compiles container image and runs container on private bridge network.
 // 4. Probes and discovers listening port (overriding defaults if needed).
@@ -252,7 +309,7 @@ func TestSmokeDeployNodeJSSample(t *testing.T) {
 
 	repoURL := os.Getenv("ASL_SMOKE_REPO")
 	if repoURL == "" {
-		repoURL = defaultSampleRepo
+		repoURL = createLocalSmokeRepo(t)
 	}
 	branch := os.Getenv("ASL_SMOKE_BRANCH")
 	if branch == "" {
