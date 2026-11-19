@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "master", "production", "frontend" ]
+    branches: [ "main", "master", "production", "frontend", "intelligence" ]
   pull_request:
-    branches: [ "main", "master", "production", "frontend" ]
+    branches: [ "main", "master", "production", "frontend", "intelligence" ]
 
 jobs:
   lint-and-unit-tests:
@@ -36,6 +36,7 @@ jobs:
       - name: Verify server and CLI binaries build cleanly
         run: |
           go build -v -o /dev/null ./cmd/server
+          go build -v -o /dev/null ./cmd/migrate
           go build -v -o /dev/null ./cmd/rekey
 
   e2e-smoke-test:

@@ -1,0 +1,128 @@
+# Isolated QA environment for API Sandbox Links.
+#
+# Dedicated infrastructure namespace preventing collisions with local development
+# or production environments during automated test runs, race detection, and CI/CD.
+#
+# Usage:
+#   docker compose -f docker-compose.qa.yml up -d
+#   docker compose -f docker-compose.qa.yml down -v
+
+version: "3.8"
+
+networks:
+  qa_net:
+    name: api_sandbox_qa_network
+    driver: bridge
+    labels:
+      qa.test: "true"
+
+volumes:
+  qa_postgres_data:
+    name: api_sandbox_qa_pgdata
+    labels:
+      qa.test: "true"
+  qa_redis_data:
+    name: api_sandbox_qa_redisdata
+    labels:
+      qa.test: "true"
+  qa_buildkit_data:
+    name: api_sandbox_qa_buildkitdata
+    labels:
+      qa.test: "true"
+
+services:
+  qa_postgres:
+    image: postgres:16-alpine
+    container_name: api-sandbox-qa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: qa_user
+      POSTGRES_PASSWORD: qa_secure_password_2026
+      POSTGRES_DB: api_sandbox_qa
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - qa_postgres_data:/var/lib/postgresql/data
+    networks:
+      - qa_net
+    labels:
+      qa.test: "true"
+      qa.component: "postgres"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qa_user -d api_sandbox_qa"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  qa_redis:
+    image: redis:7-alpine
+    container_name: api-sandbox-qa-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "127.0.0.1:6381:6379"
+    volumes:
+      - qa_redis_data:/data
+    networks:
+      - qa_net
+    labels:
+      qa.test: "true"
+      qa.component: "redis"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  qa_traefik:
+    image: traefik:v3.1
+    container_name: api-sandbox-qa-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.traefik.address=:8080
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --accesslog=true
+    ports:
+      - "8091:80"
+      - "127.0.0.1:8092:8080"
+    volumes:
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - qa_net
+    labels:
+      qa.test: "true"
+      qa.component: "traefik"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  qa_buildkit:
+    image: moby/buildkit:v0.19.0-rootless
+    container_name: api-sandbox-qa-buildkit
+    restart: unless-stopped
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    command:
+      - --addr
+      - tcp://0.0.0.0:1234
+      - --oci-worker-no-process-sandbox
+    ports:
+      - "127.0.0.1:1235:1234"
+    volumes:
+      - qa_buildkit_data:/home/user/.local/share/buildkit
+    networks:
+      - qa_net
+    labels:
+      qa.test: "true"
+      qa.component: "buildkit"
+    healthcheck:
+      test: ["CMD", "buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
