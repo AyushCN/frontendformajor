@@ -18,5 +18,5 @@ CREATE INDEX IF NOT EXISTS idx_sandbox_subdomain_aliases_subdomain ON sandbox_su
 -- Backfill name and slug for existing rows
 UPDATE sandboxes SET slug = SPLIT_PART(subdomain, '-', 1) WHERE slug = '' AND subdomain != '';
 UPDATE sandboxes SET name = slug WHERE name = '' AND slug != '';
-UPDATE sandboxes SET name = 'sandbox-' || SUBSTRING(id, 1, 8) WHERE name = '';
-UPDATE sandboxes SET slug = 'sandbox-' || SUBSTRING(id, 1, 8) WHERE slug = '';
+UPDATE sandboxes SET name = 'sandbox-' || SUBSTRING(id::text, 1, 8) WHERE name = '';
+UPDATE sandboxes SET slug = 'sandbox-' || SUBSTRING(id::text, 1, 8) WHERE slug = '';
