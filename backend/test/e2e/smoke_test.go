@@ -245,6 +245,7 @@ func setupSmokeEnv(t *testing.T) *smokeEnv {
 		BuildConcurrency:          2,
 		MaxActiveSandboxesPerUser: 10,
 		MaxRunningSandboxes:       20,
+		EncryptionKey:             key,
 	}
 
 	slogLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -443,10 +444,29 @@ func TestSmokeDeployNodeJSSample(t *testing.T) {
 		t.Fatalf("failed to mark sandbox hibernated: %v", err)
 	}
 
-	// Make another request through the Gateway — it must trigger wake and return 200 OK
+	// 4a. Verify that an unauthenticated request to a hibernated sandbox is rejected with 401
+	unauthRec := httptest.NewRecorder()
+	unauthReq := httptest.NewRequest("GET", "/", nil)
+	unauthReq.Host = fmt.Sprintf("%s.%s", subdomain, env.cfg.SandboxBaseDomain)
+	env.gateway.Handler().ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated wake request to return 401 Unauthorized, got %d", unauthRec.Code)
+	}
+
+	// 4b. Make an authenticated request through the Gateway — it must trigger wake and return 200 OK
 	wakeRec := httptest.NewRecorder()
 	wakeReq := httptest.NewRequest("GET", "/", nil)
 	wakeReq.Host = fmt.Sprintf("%s.%s", subdomain, env.cfg.SandboxBaseDomain)
+
+	sessionPayload := fmt.Sprintf("%d:%d:%s", user.GithubID, time.Now().Unix(), "smoke-wake-nonce")
+	sessionToken, err := env.secretBox.Encrypt([]byte(sessionPayload))
+	if err != nil {
+		t.Fatalf("failed to generate session cookie for wake test: %v", err)
+	}
+	wakeReq.AddCookie(&http.Cookie{
+		Name:  "asl_session",
+		Value: string(sessionToken),
+	})
 
 	env.gateway.Handler().ServeHTTP(wakeRec, wakeReq)
 	if wakeRec.Code != http.StatusOK {
