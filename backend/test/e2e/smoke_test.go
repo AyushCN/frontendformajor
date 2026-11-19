@@ -26,6 +26,7 @@ import (
 	"github.com/api-sandbox-links/backend/internal/secret"
 	"github.com/docker/docker/client"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -76,6 +77,22 @@ func createLocalSmokeRepo(t *testing.T) string {
 	}
 
 	return repoDir
+}
+
+func TestCreateLocalSmokeRepo(t *testing.T) {
+	repoDir := createLocalSmokeRepo(t)
+	cloneDir := t.TempDir()
+	if _, err := git.PlainClone(cloneDir, false, &git.CloneOptions{
+		URL:           repoDir,
+		ReferenceName: plumbing.NewBranchReferenceName(defaultSampleBranch),
+		SingleBranch:  true,
+		Depth:         1,
+	}); err != nil {
+		t.Fatalf("failed to clone local smoke repository: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cloneDir, "server.js")); err != nil {
+		t.Fatalf("local smoke repository is missing server.js: %v", err)
+	}
 }
 
 // smokeEnv validates availability of real Docker, Postgres, Redis, and Builder CLI.
